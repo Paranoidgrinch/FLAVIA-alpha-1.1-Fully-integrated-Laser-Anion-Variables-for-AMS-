@@ -1,0 +1,5 @@
+PyQt5
+paho-mqtt
+matplotlib
+numpy
+paramiko
