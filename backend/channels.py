@@ -72,6 +72,8 @@ SETPOINT_LIMITS: Dict[str, Tuple[float, float, float]] = {
     "psu/2/set_v": (0.0, 75.0, 0.1),
     "hv/1/set_v": (0.0, 6500.0, 10.0),
     "hv/4/set_v": (0.0, 6500.0, 10.0),
+    "hv/2/set_v": (0.0, 3500.0, 10.0),
+    "hv/3/set_v": (0.0, 6500.0, 10.0),
 
     # Pressure AO (0–10 V)
     "pressure/set_v": (0.0, 10.0, 0.01),
@@ -223,6 +225,18 @@ _add("pressure/set_v", unit="V", kind="set", decimals=3, topic_cmd="pressure/cmd
 _add("pressure/meas_v", unit="V", kind="meas", decimals=3)
 _add("pressure/dbg/ao_counts", unit="cts", kind="meas", decimals=0)
 
+#hv2 (3500v)
+_add("hv/2/set_v", unit="V", kind="set", decimals=1, topic_cmd="hv/2/cmd/set_v")
+_add("hv/2/meas_v", unit="V", kind="meas", decimals=1)
+_add("hv/2/meas_i_mA", unit="mA", kind="meas", decimals=4)
+_add("hv/2/dbg/ao_counts", unit="cts", kind="meas", decimals=0)
+
+# --- HV3 (6500 V) ---
+_add("hv/3/set_v", unit="V", kind="set", decimals=1, topic_cmd="hv/3/cmd/set_v")
+_add("hv/3/meas_v", unit="V", kind="meas", decimals=1)
+_add("hv/3/meas_i_mA", unit="mA", kind="meas", decimals=4)
+_add("hv/3/dbg/ao_counts", unit="cts", kind="meas", decimals=0)
+
 
 # --- 3) gnd-plc (Root cs/) ---
 # Analog lenses + ion cooler
@@ -294,7 +308,7 @@ GROUPS: Dict[str, List[str]] = {
         "cs/lens4/set_u_v",
 
         # ✅ steerers belong here
-        "steerer/bias/set_u",
+        # "steerer/bias/set_u",
         "steerer/1x/set_u",
         "steerer/1y/set_u",
         "steerer/2x/set_u",
@@ -307,6 +321,8 @@ GROUPS: Dict[str, List[str]] = {
         "cs/ion_cooler/set_u_v",
 
         "hv/1/set_v",
+        "hv/2/set_v",
+        "hv/3/set_v",
         "hv/4/set_v",
         "psu/1/set_v",
         "psu/2/set_v",

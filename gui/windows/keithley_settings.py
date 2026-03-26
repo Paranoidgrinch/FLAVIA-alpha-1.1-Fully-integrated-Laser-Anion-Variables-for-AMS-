@@ -1,13 +1,122 @@
-# gui/windows/keithley_settings.py
 from __future__ import annotations
 
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QGroupBox, QFormLayout, QLineEdit, QSpinBox, QDoubleSpinBox,
-    QCheckBox, QComboBox, QLabel, QPushButton, QHBoxLayout
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
 )
 
-# expected to exist in your "new keithley worker"
-from backend.workers.keithley_6485_worker import KeithleySettings, AvgFilterSettings
+from backend.workers.keithley_6485_worker import (
+    AvgFilterSettings,
+    KeithleySettings,
+    MeasureSettings,
+    RangeSettings,
+    TraceSettings,
+    TuneSettings,
+)
+
+
+class _ModeBox(QGroupBox):
+    def __init__(self, title: str, has_poll_hz: bool, settings_obj, parent=None):
+        super().__init__(title, parent)
+        self.has_poll_hz = has_poll_hz
+        form = QFormLayout(self)
+
+        self.sb_nplc = QDoubleSpinBox()
+        self.sb_nplc.setRange(0.0001, 10.0)
+        self.sb_nplc.setDecimals(4)
+        self.sb_nplc.setValue(float(settings_obj.nplc))
+        form.addRow("NPLC:", self.sb_nplc)
+
+        if has_poll_hz:
+            self.sb_poll = QDoubleSpinBox()
+            self.sb_poll.setRange(1.0, 200.0)
+            self.sb_poll.setDecimals(1)
+            self.sb_poll.setValue(float(settings_obj.poll_hz))
+            form.addRow("Poll rate [Hz]:", self.sb_poll)
+
+            self.sb_bucket = QDoubleSpinBox()
+            self.sb_bucket.setRange(0.05, 60.0)
+            self.sb_bucket.setDecimals(2)
+            self.sb_bucket.setValue(float(settings_obj.bucket_interval_s))
+            form.addRow("Bucket interval [s]:", self.sb_bucket)
+        else:
+            self.sb_interval = QDoubleSpinBox()
+            self.sb_interval.setRange(0.05, 60.0)
+            self.sb_interval.setDecimals(2)
+            self.sb_interval.setValue(float(settings_obj.interval_s))
+            form.addRow("Interval [s]:", self.sb_interval)
+
+        self.cb_autozero = QCheckBox("Autozero")
+        self.cb_autozero.setChecked(bool(settings_obj.autozero))
+        form.addRow("", self.cb_autozero)
+
+        self.sb_display_tau = QDoubleSpinBox()
+        self.sb_display_tau.setRange(0.01, 10.0)
+        self.sb_display_tau.setDecimals(2)
+        self.sb_display_tau.setValue(float(getattr(settings_obj, "display_tau_s", 0.3)))
+        form.addRow("Gauge tau [s]:", self.sb_display_tau)
+
+        self.cb_auto = QCheckBox("Auto range")
+        self.cb_auto.setChecked(bool(settings_obj.range.auto))
+        form.addRow("", self.cb_auto)
+
+        self.sb_fixed = QDoubleSpinBox()
+        self.sb_fixed.setRange(0.001, 1e9)
+        self.sb_fixed.setDecimals(3)
+        self.sb_fixed.setValue(float(settings_obj.range.fixed_range_nA))
+        form.addRow("Fixed range [nA]:", self.sb_fixed)
+
+        self.cb_avg = QCheckBox("Enable averaging filter")
+        self.cb_avg.setChecked(bool(settings_obj.avg_filter.enabled))
+        form.addRow("", self.cb_avg)
+
+        self.sb_avg_cnt = QSpinBox()
+        self.sb_avg_cnt.setRange(1, 10000)
+        self.sb_avg_cnt.setValue(int(settings_obj.avg_filter.count))
+        form.addRow("Avg count:", self.sb_avg_cnt)
+
+        self.cb_avg_tcon = QComboBox()
+        self.cb_avg_tcon.addItems(["MOV", "REP"])
+        self.cb_avg_tcon.setCurrentText((settings_obj.avg_filter.tcon or "MOV").upper())
+        form.addRow("Avg type:", self.cb_avg_tcon)
+
+        self.cb_auto.toggled.connect(self.sb_fixed.setDisabled)
+        self.sb_fixed.setEnabled(not self.cb_auto.isChecked())
+
+    def build_range(self) -> RangeSettings:
+        return RangeSettings(auto=bool(self.cb_auto.isChecked()), fixed_range_nA=float(self.sb_fixed.value()))
+
+    def build_avg(self) -> AvgFilterSettings:
+        return AvgFilterSettings(
+            enabled=bool(self.cb_avg.isChecked()),
+            count=int(self.sb_avg_cnt.value()),
+            tcon=self.cb_avg_tcon.currentText().strip().upper(),
+        )
+
+    def build_mode_settings(self, cls):
+        kwargs = {
+            "nplc": float(self.sb_nplc.value()),
+            "autozero": bool(self.cb_autozero.isChecked()),
+            "display_tau_s": float(self.sb_display_tau.value()),
+            "range": self.build_range(),
+            "avg_filter": self.build_avg(),
+        }
+        if self.has_poll_hz:
+            kwargs["poll_hz"] = float(self.sb_poll.value())
+            kwargs["bucket_interval_s"] = float(self.sb_bucket.value())
+        else:
+            kwargs["interval_s"] = float(self.sb_interval.value())
+        return cls(**kwargs)
 
 
 class SettingsDialog(QDialog):
@@ -16,10 +125,10 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Keithley Settings")
         self._s = settings
 
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
 
         g_conn = QGroupBox("Connection")
-        f_conn = QFormLayout()
+        f_conn = QFormLayout(g_conn)
         self.ed_host = QLineEdit(settings.host)
         self.sb_port = QSpinBox()
         self.sb_port.setRange(1, 65535)
@@ -36,101 +145,35 @@ class SettingsDialog(QDialog):
         f_conn.addRow("Port:", self.sb_port)
         f_conn.addRow("Connect timeout [s]:", self.sb_cto)
         f_conn.addRow("I/O timeout [s]:", self.sb_ito)
-        g_conn.setLayout(f_conn)
 
-        g_mode = QGroupBox("Mode")
-        h_mode = QHBoxLayout()
+        g_mode = QGroupBox("Active mode")
+        h_mode = QHBoxLayout(g_mode)
         self.cb_mode = QComboBox()
-        self.cb_mode.addItems(["TUNE", "MEASURE"])
-        self.cb_mode.setCurrentText(settings.mode.upper())
+        self.cb_mode.addItems(["TUNE", "TRACE", "MEASURE"])
+        self.cb_mode.setCurrentText((settings.mode or "TUNE").upper())
         h_mode.addWidget(QLabel("Mode:"))
         h_mode.addWidget(self.cb_mode)
-        h_mode.addStretch()
-        g_mode.setLayout(h_mode)
+        h_mode.addStretch(1)
 
-        g_tune = QGroupBox("Tune (fast)")
-        f_tune = QFormLayout()
-        self.sb_t_nplc = QDoubleSpinBox()
-        self.sb_t_nplc.setRange(0.0001, 10.0)
-        self.sb_t_nplc.setDecimals(4)
-        self.sb_t_nplc.setValue(float(settings.tune.nplc))
-        self.sb_t_poll = QDoubleSpinBox()
-        self.sb_t_poll.setRange(1.0, 200.0)
-        self.sb_t_poll.setDecimals(1)
-        self.sb_t_poll.setValue(float(settings.tune.poll_hz))
-        self.sb_t_bucket = QDoubleSpinBox()
-        self.sb_t_bucket.setRange(0.05, 10.0)
-        self.sb_t_bucket.setDecimals(2)
-        self.sb_t_bucket.setValue(float(settings.tune.bucket_interval_s))
-        self.cb_t_az = QCheckBox("Autozero")
-        self.cb_t_az.setChecked(bool(settings.tune.autozero))
-        f_tune.addRow("NPLC:", self.sb_t_nplc)
-        f_tune.addRow("Poll rate [Hz]:", self.sb_t_poll)
-        f_tune.addRow("Bucket interval [s]:", self.sb_t_bucket)
-        f_tune.addRow("", self.cb_t_az)
-        g_tune.setLayout(f_tune)
-
-        g_meas = QGroupBox("Measure (precision)")
-        f_meas = QFormLayout()
-        self.sb_m_nplc = QDoubleSpinBox()
-        self.sb_m_nplc.setRange(0.0001, 10.0)
-        self.sb_m_nplc.setDecimals(4)
-        self.sb_m_nplc.setValue(float(settings.measure.nplc))
-        self.sb_m_int = QDoubleSpinBox()
-        self.sb_m_int.setRange(0.2, 60.0)
-        self.sb_m_int.setDecimals(2)
-        self.sb_m_int.setValue(float(settings.measure.interval_s))
-        self.cb_m_az = QCheckBox("Autozero")
-        self.cb_m_az.setChecked(bool(settings.measure.autozero))
-        f_meas.addRow("NPLC:", self.sb_m_nplc)
-        f_meas.addRow("Interval [s]:", self.sb_m_int)
-        f_meas.addRow("", self.cb_m_az)
-        g_meas.setLayout(f_meas)
-
-        g_rng = QGroupBox("Range")
-        f_rng = QFormLayout()
-        self.cb_auto = QCheckBox("Auto range")
-        self.cb_auto.setChecked(bool(settings.tune.range.auto))
-        self.sb_fixed = QDoubleSpinBox()
-        self.sb_fixed.setRange(0.001, 1e9)
-        self.sb_fixed.setDecimals(3)
-        self.sb_fixed.setValue(float(settings.tune.range.fixed_range_nA))
-        f_rng.addRow("", self.cb_auto)
-        f_rng.addRow("Fixed range [nA] (auto off):", self.sb_fixed)
-        g_rng.setLayout(f_rng)
-
-        g_filt = QGroupBox("Averaging filter (best effort)")
-        f_filt = QFormLayout()
-        self.cb_avg = QCheckBox("Enable averaging filter")
-        self.cb_avg.setChecked(bool(settings.measure.avg_filter.enabled))
-        self.sb_avg_cnt = QSpinBox()
-        self.sb_avg_cnt.setRange(1, 10000)
-        self.sb_avg_cnt.setValue(int(settings.measure.avg_filter.count))
-        self.cb_avg_tcon = QComboBox()
-        self.cb_avg_tcon.addItems(["MOV", "REP"])
-        self.cb_avg_tcon.setCurrentText(settings.measure.avg_filter.tcon.upper())
-        f_filt.addRow("", self.cb_avg)
-        f_filt.addRow("Count:", self.sb_avg_cnt)
-        f_filt.addRow("Type:", self.cb_avg_tcon)
-        g_filt.setLayout(f_filt)
+        self.box_tune = _ModeBox("Tune (fast/live)", has_poll_hz=True, settings_obj=settings.tune)
+        self.box_trace = _ModeBox("Trace (scan)", has_poll_hz=True, settings_obj=getattr(settings, "trace", TraceSettings()))
+        self.box_measure = _ModeBox("Measure (precision)", has_poll_hz=False, settings_obj=settings.measure)
 
         btns = QHBoxLayout()
+        btns.addStretch(1)
         self.btn_ok = QPushButton("OK")
         self.btn_cancel = QPushButton("Cancel")
         self.btn_ok.clicked.connect(self.accept)
         self.btn_cancel.clicked.connect(self.reject)
-        btns.addStretch()
         btns.addWidget(self.btn_ok)
         btns.addWidget(self.btn_cancel)
 
         layout.addWidget(g_conn)
         layout.addWidget(g_mode)
-        layout.addWidget(g_tune)
-        layout.addWidget(g_meas)
-        layout.addWidget(g_rng)
-        layout.addWidget(g_filt)
+        layout.addWidget(self.box_tune)
+        layout.addWidget(self.box_trace)
+        layout.addWidget(self.box_measure)
         layout.addLayout(btns)
-        self.setLayout(layout)
 
     def get_settings(self) -> KeithleySettings:
         s = self._s
@@ -139,28 +182,7 @@ class SettingsDialog(QDialog):
         s.connect_timeout_s = float(self.sb_cto.value())
         s.io_timeout_s = float(self.sb_ito.value())
         s.mode = self.cb_mode.currentText().strip().upper()
-
-        s.tune.nplc = float(self.sb_t_nplc.value())
-        s.tune.poll_hz = float(self.sb_t_poll.value())
-        s.tune.bucket_interval_s = float(self.sb_t_bucket.value())
-        s.tune.autozero = bool(self.cb_t_az.isChecked())
-
-        s.measure.nplc = float(self.sb_m_nplc.value())
-        s.measure.interval_s = float(self.sb_m_int.value())
-        s.measure.autozero = bool(self.cb_m_az.isChecked())
-
-        auto = bool(self.cb_auto.isChecked())
-        fixed = float(self.sb_fixed.value())
-        s.tune.range.auto = auto
-        s.tune.range.fixed_range_nA = fixed
-        s.measure.range.auto = auto
-        s.measure.range.fixed_range_nA = fixed
-
-        af = AvgFilterSettings(
-            enabled=bool(self.cb_avg.isChecked()),
-            count=int(self.sb_avg_cnt.value()),
-            tcon=self.cb_avg_tcon.currentText().strip().upper(),
-        )
-        s.tune.avg_filter = af
-        s.measure.avg_filter = af
+        s.tune = self.box_tune.build_mode_settings(TuneSettings)
+        s.trace = self.box_trace.build_mode_settings(TraceSettings)
+        s.measure = self.box_measure.build_mode_settings(MeasureSettings)
         return s

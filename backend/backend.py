@@ -4,6 +4,7 @@ import threading
 import time
 
 from typing import Optional, Any
+from copy import deepcopy
 
 from .channels import MQTT_DEFAULT_HOST, MQTT_DEFAULT_PORT, CHANNELS, decimals_for, unit_for
 from .model import DataModel
@@ -16,6 +17,12 @@ from .workers.gaussmeter_worker import GaussmeterWorker
 from .services.logging_service import LoggingService, LoggingConfig
 from .services.config_service import ConfigService, ConfigPayload
 from .services.rfq_service import RFQService
+
+SOURCE_HV_CHANNELS = (
+    "cs/sputter/set_u_v",
+    "cs/extraction/set_u_v",
+    "cs/einzellens/set_u_v",
+)
 
 class Backend:
     """Orchestrator for all background workers + services."""
@@ -33,6 +40,7 @@ class Backend:
         #ramp für config laden
         self._ramp_cancel = threading.Event()
         self._ramp_thread = None
+        self._last_killed_source_hv: Optional[dict[str, float]] = None
 
 
         #magnet
@@ -57,6 +65,16 @@ class Backend:
         self.rfq = RFQService()
         self.rfq.fgStatus.connect(self._on_rfq_fg_status)
 
+        self._default_steerer_channels = [
+            "steerer/bias/set_u",
+            "steerer/1x/set_u",
+            "steerer/1y/set_u",
+            "steerer/2x/set_u",
+            "steerer/2y/set_u",
+            "steerer/3x/set_u",
+            "steerer/3y/set_u",
+        ]
+
         self._started = False
 
 
@@ -77,11 +95,31 @@ class Backend:
         self.mqtt.start()
         self.cup.start()
         self.keithley.start()
+        self.keithley.cmd_connect()
         self.rfq.start()
         self.stepper.start()
         self.magnet.start()
         self.gaussmeter.start()
+        
+
+        def _delayed_steerer_defaults():
+            time.sleep(2)  # wait for initial MQTT values to arrive
+            self.apply_default_steerer_values_if_empty()
+
+        threading.Thread(target=_delayed_steerer_defaults, daemon=True).start()
         # logging thread starts lazily on first start_logging()
+
+    def apply_default_steerer_values_if_empty(self) -> None:
+        for key in self._default_steerer_channels:
+            ch = self.model.get(key)
+            if ch is None:
+                continue
+
+            if ch.value is None:
+                try:
+                    self.set_channel(key, 250.0)
+                except Exception:
+                    pass
 
     def stop(self) -> None:
         if not self._started:
@@ -142,6 +180,18 @@ class Backend:
     def mqtt_publish_value(self, topic: str, value: Any, *, decimals: int = 6) -> None:
         self.mqtt.publish_value(topic, value, decimals=decimals)
 
+
+    #keithley zeug neu
+    def get_keithley_settings_copy(self):
+        return deepcopy(self.keithley.get_settings_copy())
+
+
+    def apply_keithley_settings(self, settings):
+        self.keithley.cmd_apply_settings(deepcopy(settings))
+
+
+    def reset_keithley_trace(self):
+        self.keithley.cmd_reset_trace()
     # ----------------------
     # Channel-based set API
     # ----------------------
@@ -154,6 +204,90 @@ class Backend:
 
     def set_bool(self, channel_name: str, on: bool) -> None:
         self.set_channel(channel_name, bool(on))
+
+    def _cancel_active_ramp(self) -> None:
+        try:
+            self._ramp_cancel.set()
+        except Exception:
+            pass
+
+    def _channel_numeric_value(self, channel_name: str, fallback: float = 0.0) -> float:
+        ch = self.model.get(channel_name)
+
+        if ch is None or ch.value is None:
+            if "/set_" in channel_name:
+                ch2 = self.model.get(channel_name.replace("/set_", "/meas_", 1))
+                if ch2 and ch2.value is not None:
+                    ch = ch2
+            elif channel_name.endswith("/set_v"):
+                ch2 = self.model.get(channel_name.replace("/set_v", "/meas_v", 1))
+                if ch2 and ch2.value is not None:
+                    ch = ch2
+            elif channel_name.endswith("/set_u"):
+                ch2 = self.model.get(channel_name.replace("/set_u", "/meas_u", 1))
+                if ch2 and ch2.value is not None:
+                    ch = ch2
+            elif channel_name.endswith("/set_u_v"):
+                ch2 = self.model.get(channel_name.replace("/set_u_v", "/meas_u_v", 1))
+                if ch2 and ch2.value is not None:
+                    ch = ch2
+
+        try:
+            return float(ch.value) if (ch and ch.value is not None) else float(fallback)
+        except Exception:
+            return float(fallback)
+
+    def _ramp_targets(self, targets: dict[str, float], ramp_s: float = 10.0) -> None:
+        if not targets:
+            return
+
+        self._cancel_active_ramp()
+        self._ramp_cancel = threading.Event()
+
+        starts = {k: self._channel_numeric_value(k, fallback=float(v)) for k, v in targets.items()}
+
+        steps = max(50, int(float(ramp_s) * 10))
+        dt = float(ramp_s) / steps if steps > 0 else 0.1
+
+        def ramp_thread():
+            for i in range(steps + 1):
+                if self._ramp_cancel.is_set():
+                    return
+
+                frac = i / steps
+                for k, tgt in targets.items():
+                    s0 = starts[k]
+                    v = s0 + (float(tgt) - s0) * frac
+                    try:
+                        self.set_channel(k, v)
+                    except Exception:
+                        pass
+
+                time.sleep(dt)
+
+        self._ramp_thread = threading.Thread(target=ramp_thread, daemon=True)
+        self._ramp_thread.start()
+
+    def kill_source_hv(self) -> bool:
+        snapshot = {
+            ch: self._channel_numeric_value(ch, fallback=0.0)
+            for ch in SOURCE_HV_CHANNELS
+        }
+        self._last_killed_source_hv = dict(snapshot)
+
+        self._cancel_active_ramp()
+
+        for ch in SOURCE_HV_CHANNELS:
+            self.set_channel(ch, 0.0)
+
+        return True
+
+    def restore_source_hv(self, ramp_s: float = 10.0) -> bool:
+        if not self._last_killed_source_hv:
+            return False
+
+        self._ramp_targets(dict(self._last_killed_source_hv), ramp_s=float(ramp_s))
+        return True
 
     # ----------------------
     # Logging

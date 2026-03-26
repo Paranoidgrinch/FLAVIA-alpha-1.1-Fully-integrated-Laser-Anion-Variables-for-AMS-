@@ -6,9 +6,9 @@ from typing import Optional, Tuple, List
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QWidget, QLabel, QToolButton, QHBoxLayout, QVBoxLayout, QGroupBox
 
-from backend.channels import decimals_for, unit_for
-from gui.widgets import StepSliderControl
 from backend.channels import decimals_for, unit_for, range_for, step_for
+from gui.widgets import StepSliderControl
+
 
 def pretty_name(channel: str) -> str:
     parts = channel.split("/")
@@ -53,7 +53,6 @@ def default_range_for(channel: str) -> Tuple[float, float]:
     if r is not None:
         return r
 
-    # fallback: fixed polarity => 0..x
     u = unit_for(channel)
     if u == "V":
         return (0.0, 10000.0)
@@ -71,7 +70,6 @@ def default_step_for(channel: str) -> float:
     if s is not None:
         return s
 
-    # fallback
     u = unit_for(channel)
     if u == "V":
         return 10.0
@@ -92,7 +90,7 @@ class AnalogBinding:
 class AnalogControl(QWidget):
     """
     Compact row:
-      [Label] [SET value+unit (bold)] ◀ [slider] ▶ [step]   [Meas: value+unit (bold)]
+      [Label] [SET value+unit (bold)] [slider incl. step-selection] [Meas: value+unit (bold)]
     """
     def __init__(self, backend, binding: AnalogBinding, label: Optional[str] = None, parent=None):
         super().__init__(parent)
@@ -108,7 +106,15 @@ class AnalogControl(QWidget):
         vmin, vmax = default_range_for(binding.set_ch)
         default_step = default_step_for(binding.set_ch)
 
-        self.slider = StepSliderControl(vmin, vmax, mult, unit_set, default_step=default_step, decimals=d_set)
+        # WICHTIG: hier weiter dein originaler Custom-Slider aus gui.widgets
+        self.slider = StepSliderControl(
+            vmin,
+            vmax,
+            mult,
+            unit_set,
+            default_step=default_step,
+            decimals=d_set,
+        )
 
         self.meas_prefix = QLabel("Meas:")
         self.meas_prefix.setStyleSheet("font-weight:800;")
@@ -240,15 +246,16 @@ class DigitalToggle(QWidget):
 
 
 class TwoColumnGroup(QGroupBox):
-    def __init__(self, title: str, parent=None):
+    def __init__(self, title: str, parent=None, fill_mode: str = "alternate"):
         super().__init__(title, parent)
+
         self._left = QVBoxLayout()
         self._right = QVBoxLayout()
         self._left.setSpacing(6)
         self._right.setSpacing(6)
 
         outer = QHBoxLayout()
-        outer.setSpacing(10)  # tighter than before
+        outer.setSpacing(10)
         outer.addLayout(self._left, 1)
         outer.addLayout(self._right, 1)
         self.setLayout(outer)
@@ -259,10 +266,15 @@ class TwoColumnGroup(QGroupBox):
         """)
 
         self._count = 0
+        self._fill_mode = fill_mode  # "alternate" oder "left_only"
 
     def add_widget(self, w: QWidget, column: Optional[int] = None) -> None:
         if column is None:
-            column = 0 if (self._count % 2 == 0) else 1
+            if self._fill_mode == "left_only":
+                column = 0
+            else:
+                column = 0 if (self._count % 2 == 0) else 1
+
         (self._left if column == 0 else self._right).addWidget(w)
         self._count += 1
 

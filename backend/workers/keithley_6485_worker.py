@@ -1,6 +1,6 @@
-# backend/workers/keithley_6485_worker.py
 from __future__ import annotations
 
+import copy
 import math
 import queue
 import socket
@@ -31,8 +31,20 @@ class TuneSettings:
     poll_hz: float = 15.0
     bucket_interval_s: float = 0.5
     autozero: bool = False
+    display_tau_s: float = 0.20
     range: RangeSettings = field(default_factory=RangeSettings)
     avg_filter: AvgFilterSettings = field(default_factory=AvgFilterSettings)
+
+
+@dataclass
+class TraceSettings:
+    nplc: float = 0.3
+    poll_hz: float = 10.0
+    bucket_interval_s: float = 1.0
+    autozero: bool = False
+    display_tau_s: float = 0.45
+    range: RangeSettings = field(default_factory=lambda: RangeSettings(auto=False, fixed_range_nA=100.0))
+    avg_filter: AvgFilterSettings = field(default_factory=lambda: AvgFilterSettings(enabled=True, count=5, tcon="MOV"))
 
 
 @dataclass
@@ -40,6 +52,7 @@ class MeasureSettings:
     nplc: float = 1.0
     interval_s: float = 2.0
     autozero: bool = True
+    display_tau_s: float = 0.80
     range: RangeSettings = field(default_factory=RangeSettings)
     avg_filter: AvgFilterSettings = field(default_factory=lambda: AvgFilterSettings(enabled=True, count=10, tcon="MOV"))
 
@@ -50,9 +63,17 @@ class KeithleySettings:
     port: int = 100
     connect_timeout_s: float = 0.8
     io_timeout_s: float = 2.0
-    mode: str = "TUNE"  # TUNE | MEASURE
+    mode: str = "TUNE"  # TUNE | TRACE | MEASURE
     tune: TuneSettings = field(default_factory=TuneSettings)
+    trace: TraceSettings = field(default_factory=TraceSettings)
     measure: MeasureSettings = field(default_factory=MeasureSettings)
+
+
+@dataclass
+class _BucketState:
+    start: Optional[float] = None
+    vals: list[float] = field(default_factory=list)
+    t0: Optional[float] = None
 
 
 class ScpiSocket:
@@ -145,7 +166,12 @@ class Keithley6485:
 
     def apply_mode(self, settings: KeithleySettings) -> None:
         mode = (settings.mode or "TUNE").upper()
-        s = settings.measure if mode == "MEASURE" else settings.tune
+        if mode == "MEASURE":
+            s = settings.measure
+        elif mode == "TRACE":
+            s = settings.trace
+        else:
+            s = settings.tune
 
         if s.range.auto:
             self.try_send(":SENS:CURR:RANG:AUTO ON")
@@ -188,11 +214,12 @@ class Keithley6485Worker(threading.Thread):
         self.dev: Optional[Keithley6485] = None
         self.connected = False
 
-        self._bucket_start: Optional[float] = None
-        self._bucket_vals: list[float] = []
-        self._t0: Optional[float] = None
+        self._stats = _BucketState()
+        self._trace = _BucketState()
 
         self.model.update("keithley/connected", False, source="keithley", quality="bad")
+        self.model.update("keithley/mode", (self.settings.mode or "TUNE").upper(), source="keithley")
+        self._publish_trace_reset_state()
 
     def _log(self, msg: str) -> None:
         self.model.update("keithley/log", msg, source="keithley")
@@ -201,6 +228,9 @@ class Keithley6485Worker(threading.Thread):
         self._cmdq.put(("stop", None))
         self.join(timeout=3.0)
 
+    def get_settings_copy(self) -> KeithleySettings:
+        return copy.deepcopy(self.settings)
+
     def cmd_connect(self) -> None:
         self._cmdq.put(("connect", None))
 
@@ -208,7 +238,7 @@ class Keithley6485Worker(threading.Thread):
         self._cmdq.put(("disconnect", None))
 
     def cmd_apply_settings(self, s: KeithleySettings) -> None:
-        self._cmdq.put(("apply", s))
+        self._cmdq.put(("apply", copy.deepcopy(s)))
 
     def cmd_restart(self) -> None:
         self._cmdq.put(("restart", None))
@@ -216,9 +246,78 @@ class Keithley6485Worker(threading.Thread):
     def cmd_zero(self) -> None:
         self._cmdq.put(("zero", None))
 
+    def cmd_reset_trace(self) -> None:
+        self._cmdq.put(("trace_reset", None))
+
     def _set_connected(self, ok: bool) -> None:
         self.connected = ok
         self.model.update("keithley/connected", bool(ok), source="keithley", quality="good" if ok else "bad")
+
+    def _publish_mode(self) -> None:
+        self.model.update("keithley/mode", (self.settings.mode or "TUNE").upper(), source="keithley")
+
+    def _publish_trace_reset_state(self) -> None:
+        self.model.update("keithley/trace/mean_nA", 0.0, source="keithley")
+        self.model.update("keithley/trace/sigma_nA", 0.0, source="keithley")
+        self.model.update("keithley/trace/n", 0, source="keithley")
+        self.model.update("keithley/trace/t_s", 0.0, source="keithley")
+
+    def _reset_bucket(self, state: _BucketState) -> None:
+        state.start = None
+        state.vals = []
+        state.t0 = None
+
+    def _reset_all_accumulators(self) -> None:
+        self._reset_bucket(self._stats)
+        self._reset_bucket(self._trace)
+        self._publish_trace_reset_state()
+
+    def _reset_trace_accumulator(self) -> None:
+        self._reset_bucket(self._trace)
+        self._publish_trace_reset_state()
+
+    def _emit_bucket(self, prefix: str, state: _BucketState, interval_s: float) -> None:
+        vals = state.vals
+        n = len(vals)
+        mean = sum(vals) / n if n else 0.0
+        var = sum((v - mean) ** 2 for v in vals) / n if n > 1 else 0.0
+        sigma = math.sqrt(max(var, 0.0))
+        if state.t0 is None:
+            state.t0 = state.start
+        t_point = (state.start + interval_s / 2.0) - state.t0 if state.start is not None else 0.0
+
+        self.model.update(f"{prefix}/mean_nA", mean, source="keithley")
+        self.model.update(f"{prefix}/sigma_nA", sigma, source="keithley")
+        self.model.update(f"{prefix}/n", n, source="keithley")
+        self.model.update(f"{prefix}/t_s", float(t_point), source="keithley")
+
+    def _bucket_update(self, prefix: str, state: _BucketState, current_nA: float, interval_s: float) -> None:
+        now = time.perf_counter()
+        if state.start is None:
+            state.start = now
+            state.vals = [current_nA]
+            return
+
+        state.vals.append(current_nA)
+        if now - state.start >= interval_s:
+            self._emit_bucket(prefix, state, interval_s)
+            state.start = now
+            state.vals = [current_nA]
+
+    def _publish_single_sample(self, current_nA: float, t_s: float) -> None:
+        for prefix in ("keithley/stats", "keithley/trace"):
+            self.model.update(f"{prefix}/mean_nA", float(current_nA), source="keithley")
+            self.model.update(f"{prefix}/sigma_nA", 0.0, source="keithley")
+            self.model.update(f"{prefix}/n", 1, source="keithley")
+            self.model.update(f"{prefix}/t_s", float(t_s), source="keithley")
+
+    def _current_poll_parameters(self) -> tuple[str, float, float]:
+        mode = (self.settings.mode or "TUNE").upper()
+        if mode == "MEASURE":
+            return mode, max(0.05, float(self.settings.measure.interval_s)), max(0.05, float(self.settings.measure.interval_s))
+        if mode == "TRACE":
+            return mode, max(0.001, 1.0 / max(1.0, float(self.settings.trace.poll_hz))), max(0.05, float(self.settings.trace.bucket_interval_s))
+        return mode, max(0.001, 1.0 / max(1.0, float(self.settings.tune.poll_hz))), max(0.05, float(self.settings.tune.bucket_interval_s))
 
     def _do_connect(self) -> None:
         if self.connected:
@@ -231,9 +330,8 @@ class Keithley6485Worker(threading.Thread):
             self._log(f"TCP connected to {s.host}:{s.port}")
             self.dev.initialize_basic()
             self.dev.apply_mode(self.settings)
-            self._bucket_start = None
-            self._bucket_vals = []
-            self._t0 = None
+            self._publish_mode()
+            self._reset_all_accumulators()
         except Exception as e:
             self._log(f"Connect failed: {e}")
             self.scpi.close()
@@ -245,31 +343,6 @@ class Keithley6485Worker(threading.Thread):
         self.dev = None
         self._set_connected(False)
         self._log("Disconnected.")
-
-    def _bucket_update(self, current_nA: float, interval_s: float) -> None:
-        now = time.perf_counter()
-        if self._bucket_start is None:
-            self._bucket_start = now
-            self._bucket_vals = [current_nA]
-            return
-        self._bucket_vals.append(current_nA)
-        if now - self._bucket_start >= interval_s:
-            vals = self._bucket_vals
-            n = len(vals)
-            mean = sum(vals) / n if n else 0.0
-            var = sum((v - mean) ** 2 for v in vals) / n if n > 1 else 0.0
-            sigma = math.sqrt(max(var, 0.0))
-            if self._t0 is None:
-                self._t0 = self._bucket_start
-            t_point = (self._bucket_start + interval_s / 2.0) - self._t0
-
-            self.model.update("keithley/stats/mean_nA", mean, source="keithley")
-            self.model.update("keithley/stats/sigma_nA", sigma, source="keithley")
-            self.model.update("keithley/stats/n", n, source="keithley")
-            self.model.update("keithley/stats/t_s", float(t_point), source="keithley")
-
-            self._bucket_start = now
-            self._bucket_vals = [current_nA]
 
     def run(self) -> None:
         while True:
@@ -284,23 +357,26 @@ class Keithley6485Worker(threading.Thread):
                     elif cmd == "disconnect":
                         self._do_disconnect()
                     elif cmd == "apply":
-                        self.settings = payload  # type: ignore
+                        self.settings = payload  # type: ignore[assignment]
                         self._log(f"Settings applied (mode={self.settings.mode})")
-                        self._bucket_start = None
-                        self._bucket_vals = []
-                        self._t0 = None
+                        self._publish_mode()
+                        self._reset_all_accumulators()
                         if self.connected and self.dev:
                             self.dev.apply_mode(self.settings)
                     elif cmd == "restart":
                         if self.connected and self.dev:
                             self._log("Restarting (*RST) ...")
                             self.dev.restart(self.settings)
+                            self._publish_mode()
+                            self._reset_all_accumulators()
                             self._log("Restart done.")
                     elif cmd == "zero":
                         if self.connected and self.dev:
                             self._log("Zero cycle ...")
                             self.dev.zero_cycle()
                             self._log("Zero cycle done.")
+                    elif cmd == "trace_reset":
+                        self._reset_trace_accumulator()
             except queue.Empty:
                 pass
 
@@ -308,28 +384,24 @@ class Keithley6485Worker(threading.Thread):
                 time.sleep(0.05)
                 continue
 
-            mode = (self.settings.mode or "TUNE").upper()
+            mode, sleep_s, bucket_interval_s = self._current_poll_parameters()
             try:
+                current_A = self.dev.read_current_A()
+                self.model.update("keithley/current_A", float(current_A), source="keithley")
+                current_nA = current_A * 1e9
+
                 if mode == "MEASURE":
-                    current_A = self.dev.read_current_A()
-                    self.model.update("keithley/current_A", float(current_A), source="keithley")
-                    current_nA = current_A * 1e9
-                    if self._t0 is None:
-                        self._t0 = time.perf_counter()
-                    t_s = time.perf_counter() - self._t0
-                    self.model.update("keithley/stats/mean_nA", float(current_nA), source="keithley")
-                    self.model.update("keithley/stats/sigma_nA", 0.0, source="keithley")
-                    self.model.update("keithley/stats/n", 1, source="keithley")
-                    self.model.update("keithley/stats/t_s", float(t_s), source="keithley")
-                    time.sleep(max(0.05, float(self.settings.measure.interval_s)))
+                    if self._stats.t0 is None:
+                        self._stats.t0 = time.perf_counter()
+                    if self._trace.t0 is None:
+                        self._trace.t0 = time.perf_counter()
+                    t_s = time.perf_counter() - self._stats.t0
+                    self._publish_single_sample(current_nA, t_s)
                 else:
-                    poll_hz = max(1.0, float(self.settings.tune.poll_hz))
-                    dt = 1.0 / poll_hz
-                    current_A = self.dev.read_current_A()
-                    self.model.update("keithley/current_A", float(current_A), source="keithley")
-                    current_nA = current_A * 1e9
-                    self._bucket_update(current_nA, max(0.05, float(self.settings.tune.bucket_interval_s)))
-                    time.sleep(max(0.001, dt))
+                    self._bucket_update("keithley/stats", self._stats, current_nA, bucket_interval_s)
+                    self._bucket_update("keithley/trace", self._trace, current_nA, bucket_interval_s)
+
+                time.sleep(sleep_s)
             except Exception as e:
                 self._log(f"I/O error: {e}")
                 self._do_disconnect()

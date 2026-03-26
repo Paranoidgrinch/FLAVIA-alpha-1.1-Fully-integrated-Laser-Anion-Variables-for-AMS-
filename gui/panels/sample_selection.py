@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
 from gui.qt_adapter import QtBackendAdapter
 
 SAMPLE_WHEEL_DIR = r"C:\Users\ALIS\Desktop\Samplel Wheel Lists"
-DEFAULT_POS_FILE = r"C:\Users\ALIS\Desktop\ALIS_LABVIEW\ALIS_Positionen.txt"
+DEFAULT_POS_FILE = r"C:\Users\ALIS\Desktop\Samplel Wheel Lists\ALIS_Positionen.txt"
 
 
 class SampleSelectionPanel(QWidget):

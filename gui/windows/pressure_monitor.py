@@ -5,18 +5,16 @@ import socket
 import re
 import math
 import datetime
-from functools import partial
 from collections import deque
 from typing import Optional, Dict
 
-from PyQt5 import QtCore, QtWidgets, QtGui
-
+from PyQt5 import QtCore, QtWidgets
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
 
 
-# === GRAPHIX Connection defaults (wie vorher) ===
+# === GRAPHIX Connection defaults ===
 DEVICE_A_IP = "192.168.0.15"   # Ion Cooler Graphix
 DEVICE_A_PORT = 100
 
@@ -25,13 +23,14 @@ DEVICE_B_PORT = 100
 
 POLL_MS = 1000
 
-SO = bytes([0x0E])
 SI = bytes([0x0F])
 EOT = bytes([0x04])
 
 
-# === Thyracont Kennlinie (wie vorher) ===
+# === Thyracont Kennlinie ===
 V_MIN, V_MAX = 1.8, 8.6
+
+
 def voltage_to_mbar(u: float) -> float:
     """Thyracont VSM72MV: V = 0.6*log10(p) + 6.8 -> p [mbar]."""
     if u is None or (isinstance(u, float) and math.isnan(u)):
@@ -42,8 +41,9 @@ def voltage_to_mbar(u: float) -> float:
         u = V_MAX
     return 10 ** ((u - 6.8) / 0.6)
 
-# Offset nur für Vac2 (wie vorher)
-CH2_OFFSET = 0.245
+
+# Offset nur für Vac2 (wie vorher) wieder entfernt
+CH2_OFFSET = 0.0
 
 
 # === Kanal-Namen ===
@@ -80,24 +80,29 @@ def leybold_crc(payload: bytes) -> bytes:
         c += 32
     return bytes([c])
 
+
 def build_read(group: int, param: int) -> bytes:
     body = f"{group};{param}".encode("ascii")
     payload = SI + body
     return payload + leybold_crc(payload) + EOT
 
+
 def parse_ack_value(resp: bytes) -> str:
+    """Parse ACK message; returns value part as string."""
     if not resp:
         return ""
     if resp.endswith(EOT):
         resp = resp[:-1]
+    # drop CRC
     if len(resp) >= 1:
         resp = resp[:-1]
     try:
-        idx = resp.index(b"\x06") + 1
+        idx = resp.index(b"\x06") + 1  # ACK (0x06)
         val = resp[idx:]
     except ValueError:
         val = resp
     return val.decode("ascii", errors="ignore").strip()
+
 
 def to_mbar(value_with_unit: str):
     m = re.search(r"([+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:\s*([A-Za-z]+))?", value_with_unit)
@@ -113,7 +118,8 @@ def to_mbar(value_with_unit: str):
         return val * 1.33322, "mbar"
     return val, "mbar"
 
-def format_sci(val: float):
+
+def format_sci(val: float) -> str:
     if val is None or (isinstance(val, float) and (math.isnan(val) or val == 0)):
         return "0 mbar"
     exp = int(math.floor(math.log10(abs(val))))
@@ -122,6 +128,7 @@ def format_sci(val: float):
     a = val / (10 ** exp)
     return f"{a:.3g} × 10^{exp} mbar"
 
+
 def html_sci(text: str) -> str:
     s = text.replace("10^", "10<sup>")
     s = s.replace(" mbar", "</sup> mbar") if "<sup>" in s else s
@@ -129,11 +136,11 @@ def html_sci(text: str) -> str:
 
 
 class TcpClient:
-    def __init__(self, host, port, timeout=2.0):
+    def __init__(self, host: str, port: int, timeout: float = 2.0):
         self.host = host
         self.port = port
         self.timeout = timeout
-        self.sock = None
+        self.sock: Optional[socket.socket] = None
 
     def connect(self):
         self.close()
@@ -150,6 +157,7 @@ class TcpClient:
     def xfer(self, frame: bytes) -> bytes:
         if not self.sock:
             self.connect()
+        assert self.sock is not None
         self.sock.sendall(frame)
         chunks = []
         while True:
@@ -169,12 +177,12 @@ class GraphixWorker(QtCore.QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._running = False
-        self.clients = {}
+        self.clients: Dict[str, TcpClient] = {}
         self._poll_items = []
         self._poll_index = 0
         self._latest_values = {key: None for key in GRAPHIX_KEYS}
         self._latest_raw = {key: "" for key in GRAPHIX_KEYS}
-        self._timer = None
+        self._timer: Optional[QtCore.QTimer] = None
 
     @QtCore.pyqtSlot()
     def start(self):
@@ -200,7 +208,7 @@ class GraphixWorker(QtCore.QObject):
                 channels = (1, 2, 3) if dev == "A" else (1,)
                 for ch in channels:
                     frame = build_read(ch, 29)
-                    key = f"{dev}{ch}"
+                    key = f"{dev}{ch}"  # A1/A2/A3/B1
                     if key in GRAPHIX_KEYS:
                         self._poll_items.append((dev, ch, frame))
             except Exception as e:
@@ -255,6 +263,7 @@ class GraphixWorker(QtCore.QObject):
             except Exception:
                 pass
 
+        # emit only after last item each sweep (consistent timestamp)
         if self._poll_index == len(self._poll_items) - 1:
             self.resultsReady.emit(dict(self._latest_values), dict(self._latest_raw))
 
@@ -262,7 +271,7 @@ class GraphixWorker(QtCore.QObject):
 
 
 class PlotCanvas(FigureCanvas):
-    def __init__(self, parent=None, max_points=600):
+    def __init__(self, parent=None, max_points: int = 600):
         self.fig = Figure(figsize=(5, 4), tight_layout=True)
         super().__init__(self.fig)
         self.setParent(parent)
@@ -275,17 +284,11 @@ class PlotCanvas(FigureCanvas):
         self.y = {key: deque(maxlen=max_points) for key in ALL_KEYS}
 
         self.lines = {}
-
         for key in LEFT_Y_KEYS:
-            color = COLOR_MAP.get(key, None)
-            label = DISPLAY_NAMES.get(key, key)
-            (ln,) = self.ax_left.plot([], [], label=label, color=color)
+            (ln,) = self.ax_left.plot([], [], label=DISPLAY_NAMES.get(key, key), color=COLOR_MAP.get(key))
             self.lines[key] = ln
-
         for key in RIGHT_Y_KEYS:
-            color = COLOR_MAP.get(key, None)
-            label = DISPLAY_NAMES.get(key, key)
-            (ln,) = self.ax_right.plot([], [], label=label, color=color)
+            (ln,) = self.ax_right.plot([], [], label=DISPLAY_NAMES.get(key, key), color=COLOR_MAP.get(key))
             self.lines[key] = ln
 
         self.plot_enabled = {key: False for key in ALL_KEYS}
@@ -324,7 +327,6 @@ class PlotCanvas(FigureCanvas):
 
         self.ax_left.relim()
         self.ax_left.autoscale_view()
-
         self.ax_right.relim()
         self.ax_right.autoscale_view()
 
@@ -339,6 +341,7 @@ class PressureMonitorWindow(QtWidgets.QDialog):
       - Vac1/Vac2 via MQTT channels in DataModel: cs/vac1/meas_v, cs/vac2/meas_v
       - Pressure control via Backend: pressure/set_v (+ show pressure/meas_v)
     """
+
     def __init__(self, backend, adapter, parent=None):
         super().__init__(parent)
         self.backend = backend
@@ -347,7 +350,7 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         self.setWindowTitle("Ion Cooler / ESA Graphix Monitor")
         self.resize(1100, 750)
 
-        # Top row: Start/Stop + logging
+        # --- Top row: Start/Stop + logging ---
         self.startBtn = QtWidgets.QPushButton("Start")
         self.stopBtn = QtWidgets.QPushButton("Stop")
         self.stopBtn.setEnabled(False)
@@ -365,12 +368,12 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         topRow.addWidget(self.logPathBtn)
         topRow.addWidget(self.logPathLbl, 1)
 
-        # Plot + channel labels
+        # --- Plot + channel labels ---
         self.channel_labels: Dict[str, QtWidgets.QLabel] = {}
         self.channel_plot_checks: Dict[str, QtWidgets.QCheckBox] = {}
         self.canvas = PlotCanvas(self, max_points=600)
 
-        # PLC Vac (now MQTT) left
+        # PLC Vac (MQTT)
         plcGB = QtWidgets.QGroupBox("PLC Vac (MQTT)")
         plcLayout = QtWidgets.QGridLayout(plcGB)
 
@@ -436,7 +439,7 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         deviceRow.addWidget(leftColWidget, 1)
         deviceRow.addWidget(ionGB, 1)
 
-        # Pressure control (MQTT via backend)
+        # --- Pressure control (MQTT via backend) ---
         mqttGB = QtWidgets.QGroupBox("Pressure Control (MQTT, 0–10 V)")
         mqttLayout = QtWidgets.QHBoxLayout(mqttGB)
 
@@ -445,37 +448,29 @@ class PressureMonitorWindow(QtWidgets.QDialog):
 
         self.pSet = QtWidgets.QDoubleSpinBox()
         self.pSet.setDecimals(2)
-        self.pSet.setRange(0, 10)
+        self.pSet.setRange(0.0, 10.0)
         self.pSet.setSingleStep(0.01)
         self.pSet.setKeyboardTracking(False)
         self.pSet.setAccelerated(True)
 
+        self.pMeasV = QtWidgets.QLabel("meas_v: —")
         self.pSetBtn = QtWidgets.QPushButton("Set Pressure (V)")
-        self.pMeasV = QtWidgets.QLabel("-")
 
-        # NEW: derived pressure labels (mbar)
-        self.pSetMbar = QtWidgets.QLabel("—")
-        self.pMeasMbar = QtWidgets.QLabel("—")
-        f = self.pSetMbar.font()
-        f.setPointSize(14)
-        f.setBold(True)
-        self.pSetMbar.setFont(f)
-        self.pMeasMbar.setFont(f)
+        # --- Fix: prevent overwriting while user types ---
+        self._pSet_user_editing: bool = False
+        le = self.pSet.lineEdit()
+        if le is not None:
+            le.textEdited.connect(self._on_pSet_text_edited)
+            le.returnPressed.connect(self._publish_pressure_set)  # Enter
+
+        self.pSet.editingFinished.connect(self._on_pSet_editing_finished)
 
         mqttLayout.addWidget(self.mqttConnLabel)
         mqttLayout.addStretch(1)
         mqttLayout.addWidget(QtWidgets.QLabel("Pressure (0–10 V)"))
         mqttLayout.addWidget(self.pSet)
-        mqttLayout.addWidget(self.pSetBtn)
-
-        mqttLayout.addWidget(QtWidgets.QLabel("set → mbar"))
-        mqttLayout.addWidget(self.pSetMbar)
-
-        mqttLayout.addWidget(QtWidgets.QLabel("meas_v"))
         mqttLayout.addWidget(self.pMeasV)
-
-        mqttLayout.addWidget(QtWidgets.QLabel("meas → mbar"))
-        mqttLayout.addWidget(self.pMeasMbar)
+        mqttLayout.addWidget(self.pSetBtn)
 
         # Main layout
         v = QtWidgets.QVBoxLayout(self)
@@ -494,12 +489,14 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         self.timer_log.timeout.connect(self.write_log_line)
 
         # worker thread for graphix
-        self.graphix_thread = None
-        self.graphix_worker = None
+        self.graphix_thread: Optional[QtCore.QThread] = None
+        self.graphix_worker: Optional[GraphixWorker] = None
 
+        # latest values (mbar) per ALL_KEYS
         self.latest = {key: None for key in ALL_KEYS}
         self.latest_raw = {key: "" for key in ALL_KEYS}
 
+        # logging state
         self._log_file = None
         self._log_path = None
         self._log_active = False
@@ -512,7 +509,6 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         self.logPathBtn.clicked.connect(self.choose_log_path)
 
         self.pSetBtn.clicked.connect(self._publish_pressure_set)
-        self.pSet.editingFinished.connect(self.pSetBtn.click)
 
         # subscribe to model channels
         self.adapter.channelUpdated.connect(self._on_channel_update)
@@ -525,16 +521,48 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         ]:
             self.adapter.register_channel(ch)
 
-        # initialize mqtt label
         self._update_mqtt_label()
 
-    def _set_pressure_labels_from_v(self, *, set_v: float | None = None, meas_v: float | None = None) -> None:
-        if set_v is not None:
-            p = voltage_to_mbar(float(set_v))
-            self.pSetMbar.setText(html_sci(format_sci(p)) if p == p else "—")
-        if meas_v is not None:
-            p = voltage_to_mbar(float(meas_v))
-            self.pMeasMbar.setText(html_sci(format_sci(p)) if p == p else "—")
+    # --- pSet overwrite fix helpers ---
+    def _on_pSet_text_edited(self, _txt: str) -> None:
+        self._pSet_user_editing = True
+
+    def _on_pSet_editing_finished(self) -> None:
+        self._pSet_user_editing = False
+
+    # --- pressure control publish ---
+    def _publish_pressure_set(self) -> None:
+        """
+        Important: interpretText() commits what's typed into the spinbox
+        even if the user clicks the button while focus is still inside the editor.
+        """
+        try:
+            # commit editor text -> value() is up-to-date
+            try:
+                self.pSet.interpretText()
+            except Exception:
+                pass
+
+            v = float(self.pSet.value())
+            v = max(0.0, min(10.0, v))
+
+            # after sending: clear focus so incoming echo can update the widget again
+            self._pSet_user_editing = False
+
+            self.backend.set_channel("pressure/set_v", v)
+
+            # optional: let the user see the committed value immediately
+            self.pSet.blockSignals(True)
+            try:
+                self.pSet.setValue(v)
+            finally:
+                self.pSet.blockSignals(False)
+
+            # allow echo updates again
+            self.pSet.clearFocus()
+
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Publish failed", str(e))
 
     # --- logging ---
     def choose_log_path(self):
@@ -554,7 +582,8 @@ class PressureMonitorWindow(QtWidgets.QDialog):
                     self.logEnable.setChecked(False)
                     return
             ok = QtWidgets.QMessageBox.question(
-                self, "Enable logging",
+                self,
+                "Enable logging",
                 f"Write measurements to\n\n{self._log_path}\n\nevery second?",
                 QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
                 QtWidgets.QMessageBox.Yes,
@@ -651,20 +680,13 @@ class PressureMonitorWindow(QtWidgets.QDialog):
             else:
                 lbl.setText(f"{name}: " + html_sci(format_sci(val)))
 
-        # Plot point (graphix + latest vac)
+        # plot point (graphix + latest vac)
         now = datetime.datetime.utcnow()
         values_for_plot = {k: self.latest.get(k, float("nan")) for k in ALL_KEYS}
         self.canvas.append_point(now, values_for_plot)
 
     def on_graphix_error(self, msg: str):
         QtWidgets.QMessageBox.warning(self, "GRAPHIX error", msg)
-
-    # --- pressure control ---
-    def _publish_pressure_set(self):
-        try:
-            self.backend.set_channel("pressure/set_v", float(self.pSet.value()))
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(self, "Publish failed", str(e))
 
     # --- model updates (MQTT via DataModel) ---
     def _update_mqtt_label(self):
@@ -673,7 +695,7 @@ class PressureMonitorWindow(QtWidgets.QDialog):
         self.mqttConnLabel.setText("MQTT: CONNECTED" if ok else "MQTT: DISCONNECTED")
         self.mqttConnLabel.setStyleSheet("color:#060" if ok else "color:#a00")
 
-    def _update_vac(self, key: str, voltage_v: float, raw: str):
+    def _update_vac_label(self, key: str, voltage_v: float, raw: str):
         p = voltage_to_mbar(voltage_v)
         self.latest[key] = p
         self.latest_raw[key] = raw
@@ -693,31 +715,33 @@ class PressureMonitorWindow(QtWidgets.QDialog):
             return
 
         if name == "pressure/set_v":
+            # ignore remote setpoint updates while user edits / focus is in spinbox
             try:
-                self.pSet.blockSignals(True)
-                self.pSet.setValue(float(value))
+                v = float(value)
             except Exception:
-                pass
+                return
+            if self._pSet_user_editing or self.pSet.hasFocus():
+                return
+            self.pSet.blockSignals(True)
+            try:
+                self.pSet.setValue(v)
             finally:
                 self.pSet.blockSignals(False)
             return
-        
 
         if name == "pressure/meas_v":
             try:
-                self.pMeasV.setText(f"{float(value):.3f}")
+                self.pMeasV.setText(f"meas_v: {float(value):.3f}")
             except Exception:
-                self.pMeasV.setText(str(value))
-            return  
-
-        
+                self.pMeasV.setText(f"meas_v: {value}")
+            return
 
         if name == "cs/vac1/meas_v":
             try:
                 u1 = float(value)
             except Exception:
                 u1 = float("nan")
-            self._update_vac("OP1", u1, raw=f"U1={u1}")
+            self._update_vac_label("OP1", u1, raw=f"U1={u1}")
             return
 
         if name == "cs/vac2/meas_v":
@@ -727,7 +751,7 @@ class PressureMonitorWindow(QtWidgets.QDialog):
                 u2 = float("nan")
             if not math.isnan(u2):
                 u2 = u2 + CH2_OFFSET
-            self._update_vac("OP2", u2, raw=f"U2corr={u2}")
+            self._update_vac_label("OP2", u2, raw=f"U2corr={u2}")
             return
 
     def closeEvent(self, ev):

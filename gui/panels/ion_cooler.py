@@ -4,7 +4,7 @@ from typing import Callable, List, Optional
 
 from PyQt5.QtWidgets import QWidget, QVBoxLayout
 
-from backend.channels import GROUPS, CHANNELS
+from backend.channels import CHANNELS
 from gui.qt_adapter import QtBackendAdapter
 from .common import TwoColumnGroup, AnalogControl, AnalogBinding, ReadOnlyValue
 
@@ -25,18 +25,27 @@ class IonCoolerPanel(QWidget):
         self.backend = backend
         self.adapter = adapter
 
-        self.group = TwoColumnGroup("Ion Cooler")
+        self.group = TwoColumnGroup("Ion Cooler", fill_mode="left_only")
         self._updaters: List[Callable[[str, object], None]] = []
 
-        names = GROUPS.get("Ion Cooler", [])
-        for ch in names:
+        entries = [
+            ("cs/ion_cooler/set_u_v", "Ion Cooler"),
+            ("hv/1/set_v", "Deceleration Electrode (HV1)"),
+            ("hv/4/set_v", "Reacceleration Electrode (HV4)"),
+            ("hv/2/set_v", "Entrance Focus Electrode (HV2)"),
+            ("hv/3/set_v", "Exit Focus Electrode (HV3)"),
+            ("psu/1/set_v", "Guidefield1 (PSU1)"),
+            ("psu/2/set_v", "Guidefield2 (PSU2)"),
+        ]
+
+        for ch, label in entries:
             cdef = CHANNELS.get(ch)
             if not cdef:
                 continue
 
             if cdef.kind == "set":
                 meas = _pair_meas(ch)
-                w = AnalogControl(backend, AnalogBinding(set_ch=ch, meas_ch=meas))
+                w = AnalogControl(backend, AnalogBinding(set_ch=ch, meas_ch=meas), label=label)
                 self.group.add_widget(w)
                 self._updaters.append(w.update_channel)
                 self.adapter.register_channel(ch)
@@ -44,7 +53,7 @@ class IonCoolerPanel(QWidget):
                     self.adapter.register_channel(meas)
 
             elif cdef.kind == "meas":
-                w = ReadOnlyValue(ch)
+                w = ReadOnlyValue(ch, label=label)
                 self.group.add_widget(w)
                 self._updaters.append(w.update_channel)
                 self.adapter.register_channel(ch)

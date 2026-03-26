@@ -1,4 +1,3 @@
-# gui/windows/keithley_gauge.py
 from __future__ import annotations
 
 import math
@@ -34,14 +33,12 @@ class GaugeWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        margin = 14
         cx = w / 2
         cy = h * 0.85
         radius = min(w, h) * 0.42
 
         painter.setPen(QPen(Qt.black, 2))
-        painter.drawArc(int(cx - radius), int(cy - radius), int(2 * radius), int(2 * radius),
-                        180 * 16, -180 * 16)
+        painter.drawArc(int(cx - radius), int(cy - radius), int(2 * radius), int(2 * radius), 180 * 16, -180 * 16)
 
         painter.setPen(QPen(Qt.black, 1))
         tick_count = 10
@@ -56,11 +53,8 @@ class GaugeWidget(QWidget):
 
             if i % 2 == 0:
                 val = self._min + frac * (self._max - self._min)
-                label = f"{val:g}"
-                lx = cx + (radius - 30) * math.cos(ang)
-                ly = cy - (radius - 30) * math.sin(ang)
                 painter.setFont(QFont("Sans", 8))
-                painter.drawText(int(lx - 12), int(ly + 4), 40, 16, Qt.AlignLeft, label)
+                painter.drawText(int(cx + (radius - 30) * math.cos(ang) - 12), int(cy - (radius - 30) * math.sin(ang) + 4), 40, 16, Qt.AlignLeft, f"{val:g}")
 
         painter.setPen(QPen(Qt.red, 3))
         v = max(self._min, min(self._max, self._value))
@@ -81,6 +75,8 @@ class GaugeWidget(QWidget):
 
 
 class KeithleyGaugeWindow(QDialog):
+    """Display-only gauge. Data ownership stays outside this window."""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Keithley Gauge")
@@ -127,6 +123,13 @@ class KeithleyGaugeWindow(QDialog):
         if self.last_nA is not None:
             self.update_current(self.last_nA)
 
+    def update_current_A(self, current_A: float) -> None:
+        try:
+            current_nA = float(current_A) * 1e9
+        except Exception:
+            current_nA = 0.0
+        self.update_current(current_nA)
+
     def update_current(self, current_nA: float) -> None:
         self.last_nA = float(current_nA)
         mn, mx, unit = self.ranges[self.range_idx]
@@ -136,5 +139,4 @@ class KeithleyGaugeWindow(QDialog):
             val = current_nA
         else:
             val = current_nA / 1000.0
-        val = max(mn, min(mx, val))
-        self.gauge.set_value(val)
+        self.gauge.set_value(max(mn, min(mx, val)))
