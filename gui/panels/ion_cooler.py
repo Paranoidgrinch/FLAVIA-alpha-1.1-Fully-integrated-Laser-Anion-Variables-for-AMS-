@@ -31,8 +31,8 @@ class IonCoolerPanel(QWidget):
         entries = [
             ("cs/ion_cooler/set_u_v", "Ion Cooler"),
             ("hv/1/set_v", "Deceleration Electrode (HV1)"),
-            ("hv/4/set_v", "Reacceleration Electrode (HV4)"),
-            ("hv/2/set_v", "Entrance Focus Electrode (HV2)"),
+            ("hv/4/set_v", "Acceleration Electrode (HV4)"),
+            ("hv/2/set_v", "Entry Focus Electrode (HV2)"),
             ("hv/3/set_v", "Exit Focus Electrode (HV3)"),
             ("psu/1/set_v", "Guidefield1 (PSU1)"),
             ("psu/2/set_v", "Guidefield2 (PSU2)"),

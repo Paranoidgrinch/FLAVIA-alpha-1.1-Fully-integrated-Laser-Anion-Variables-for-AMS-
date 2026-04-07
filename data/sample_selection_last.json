@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-03-26T08:27:16",
+  "timestamp": "2026-03-30T10:06:48",
   "command": "GO",
-  "pos_idx": 42,
-  "target_steps": 165761,
-  "sample_name": "42 (Al2O3(Ag) (1:3)  (Cu) blank)"
+  "pos_idx": 98,
+  "target_steps": 50452,
+  "sample_name": "98 (MnO2 + Ag (1:2) blank)"
 }
