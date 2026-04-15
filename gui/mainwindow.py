@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
 )
 
 from backend.backend import Backend
-from backend.services.config_service import ConfigPayload
+# from backend.services.config_service import ConfigPayload alte version
 from .qt_adapter import QtBackendAdapter
 from .windows.pressure_monitor import PressureMonitorWindow
 from .windows.tracer_1d import Tracer1DDialog
@@ -303,26 +303,40 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save Config", str(e))
 
     def load_config(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Load Config", self._last_dir or "", "JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Config",
+            self._last_dir or "",
+            "JSON (*.json)"
+        )
         if not path:
             return
+
         try:
-            payload = ConfigPayload.from_file(path)
+            payload = self.backend.load_config(path)
         except Exception as e:
             QMessageBox.critical(self, "Load Config", f"Could not read config:\n{e}")
             return
 
-        dlg = ConfigApplyDialog(payload, self)
+        dlg = ConfigApplyDialog(payload.setpoints, payload.states, payload.extras, self)
         if dlg.exec_() != dlg.Accepted:
             return
 
+        selected_keys = dlg.selected_keys()
+        if not selected_keys:
+            QMessageBox.information(self, "Config", "No parameters selected.")
+            return
+
         try:
-            self.backend.apply_config(payload, ramp_s=dlg.ramp_seconds())
+            ramp_s = dlg.ramp_seconds()
+            self.backend.apply_config(payload, selected_keys=selected_keys, ramp_s=ramp_s)
             self._last_dir = path
             QMessageBox.information(
                 self,
                 "Config",
-                f"Loaded and ramp started:\n{path}\nRamp: {dlg.ramp_seconds():.1f} s",
+                f"Loaded and ramp started:\n{path}\n"
+                f"Selected: {len(selected_keys)} parameter(s)\n"
+                f"Ramp: {ramp_s:.1f} s"
             )
         except Exception as e:
             QMessageBox.critical(self, "Apply Config", str(e))

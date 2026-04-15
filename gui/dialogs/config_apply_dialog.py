@@ -1,12 +1,17 @@
-# gui/dialogs/config_apply_dialog.py
 from __future__ import annotations
 
 from typing import Dict, Any, Set
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
-    QTreeWidget, QTreeWidgetItem, QLabel
+    QDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QLabel,
+    QDoubleSpinBox,
 )
 
 from gui.panels.common import pretty_name
@@ -26,9 +31,7 @@ class ConfigApplyDialog(QDialog):
     def __init__(self, setpoints: Dict[str, Any], states: Dict[str, Any], extras: Dict[str, Any], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Load config – select parameters to apply")
-        self.resize(650, 520)
-
-        self._selected: Set[str] = set()
+        self.resize(650, 560)
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Select which parameters should be applied from the config file:"))
@@ -66,6 +69,19 @@ class ConfigApplyDialog(QDialog):
             it.setCheckState(0, Qt.Checked)
 
         self.tree.expandAll()
+
+        ramp_row = QHBoxLayout()
+        ramp_row.addWidget(QLabel("Ramp time (s):"))
+
+        self.spin_ramp = QDoubleSpinBox()
+        self.spin_ramp.setDecimals(1)
+        self.spin_ramp.setRange(0.5, 300.0)
+        self.spin_ramp.setSingleStep(0.5)
+        self.spin_ramp.setValue(30.0)
+        ramp_row.addWidget(self.spin_ramp)
+        ramp_row.addStretch(1)
+
+        layout.addLayout(ramp_row)
 
         btns = QHBoxLayout()
         self.btn_all = QPushButton("Select all")
@@ -114,3 +130,6 @@ class ConfigApplyDialog(QDialog):
                 if k:
                     sel.add(str(k))
         return sel
+
+    def ramp_seconds(self) -> float:
+        return float(self.spin_ramp.value())

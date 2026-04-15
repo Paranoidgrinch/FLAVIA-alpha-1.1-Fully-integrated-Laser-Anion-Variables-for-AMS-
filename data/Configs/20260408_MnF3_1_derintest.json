@@ -1,0 +1,38 @@
+{
+  "extras": {
+    "magnet_current_set": 42.9438,
+    "rfq/fg_freq_hz": 1800000.0,
+    "rfq/fg_vpp": 5.0
+  },
+  "setpoints": {
+    "cs/einzellens/set_u_v": 17297.65,
+    "cs/esa/set_u_v": 2366.35,
+    "cs/extraction/set_u_v": 17200.0,
+    "cs/ion_cooler/set_u_v": 23734.7,
+    "cs/lens2/set_u_v": 8960.0,
+    "cs/lens4/set_u_v": 7367.65,
+    "cs/oven/set_i_a": 0.0,
+    "cs/qp1/set_u_v": 475.0,
+    "cs/qp2/set_u_v": 790.0,
+    "cs/qp3/set_u_v": 529.0,
+    "cs/sputter/set_u_v": 7600.0,
+    "hv/1/set_v": 240.0,
+    "hv/2/set_v": 0.0,
+    "hv/3/set_v": 0.0,
+    "hv/4/set_v": 770.0,
+    "pressure/set_v": 0.0,
+    "psu/1/set_v": 0.4,
+    "psu/2/set_v": 0.0,
+    "steerer/1x/set_u": 254.18,
+    "steerer/1y/set_u": 269.0,
+    "steerer/2x/set_u": 296.18,
+    "steerer/2y/set_u": 202.24,
+    "steerer/3x/set_u": 219.29,
+    "steerer/3y/set_u": 262.82
+  },
+  "states": {
+    "cs/attenuator/state": false,
+    "cs/quick_cool/state": false
+  },
+  "version": 3
+}
