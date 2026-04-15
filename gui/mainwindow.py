@@ -279,13 +279,40 @@ class MainWindow(QMainWindow):
 
     def toggle_logging(self) -> None:
         if not self._logging:
-            self.backend.start_logging()
+            default_name = datetime.now().strftime("log_%Y%m%d_%H%M%S.tsv")
+            start_path = self._last_dir or default_name
+
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Start Logging",
+                start_path,
+                "TSV Files (*.tsv);;All Files (*)",
+            )
+            if not path:
+                return
+
+            if not path.lower().endswith(".tsv"):
+                path += ".tsv"
+
+            try:
+                self.backend.start_logging(path)
+            except Exception as e:
+                QMessageBox.critical(self, "Start Logging", str(e))
+                return
+
+            self._last_dir = path
             self._logging = True
             self.btn_log.setText("Stop Logging")
             self.lbl_log.setText("LOG: ON")
             self.lbl_log.setStyleSheet("color:#0a0;")
+
         else:
-            self.backend.stop_logging()
+            try:
+                self.backend.stop_logging()
+            except Exception as e:
+                QMessageBox.critical(self, "Stop Logging", str(e))
+                return
+
             self._logging = False
             self.btn_log.setText("Start Logging")
             self.lbl_log.setText("LOG: OFF")
