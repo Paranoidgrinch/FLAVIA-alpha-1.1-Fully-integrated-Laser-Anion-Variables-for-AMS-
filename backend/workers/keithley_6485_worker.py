@@ -43,7 +43,7 @@ class TraceSettings:
     bucket_interval_s: float = 1.0
     autozero: bool = False
     display_tau_s: float = 0.45
-    range: RangeSettings = field(default_factory=lambda: RangeSettings(auto=False, fixed_range_nA=100.0))
+    range: RangeSettings = field(default_factory=lambda: RangeSettings(auto=True, fixed_range_nA=100.0))
     avg_filter: AvgFilterSettings = field(default_factory=lambda: AvgFilterSettings(enabled=True, count=5, tcon="MOV"))
 
 
