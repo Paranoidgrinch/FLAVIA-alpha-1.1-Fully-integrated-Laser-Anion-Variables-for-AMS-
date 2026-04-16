@@ -248,7 +248,7 @@ class MainWindow(QMainWindow):
 
     def kill_source_hv(self) -> None:
         try:
-            ok = self.backend.kill_source_hv()
+            ok = self.backend.kill_source_hv(ramp_s=15.0)
         except Exception as e:
             QMessageBox.critical(self, "Kill Source HV", str(e))
             return
@@ -258,7 +258,7 @@ class MainWindow(QMainWindow):
 
     def restore_source_hv(self) -> None:
         try:
-            ok = self.backend.restore_source_hv(ramp_s=10.0)
+            ok = self.backend.restore_source_hv(ramp_s=20.0)
         except Exception as e:
             QMessageBox.critical(self, "Restore Source HV", str(e))
             return

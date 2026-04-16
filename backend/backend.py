@@ -268,18 +268,15 @@ class Backend:
         self._ramp_thread = threading.Thread(target=ramp_thread, daemon=True)
         self._ramp_thread.start()
 
-    def kill_source_hv(self) -> bool:
+    def kill_source_hv(self, ramp_s: float = 15.0) -> bool:
         snapshot = {
             ch: self._channel_numeric_value(ch, fallback=0.0)
             for ch in SOURCE_HV_CHANNELS
         }
         self._last_killed_source_hv = dict(snapshot)
 
-        self._cancel_active_ramp()
-
-        for ch in SOURCE_HV_CHANNELS:
-            self.set_channel(ch, 0.0)
-
+        targets = {ch: 0.0 for ch in SOURCE_HV_CHANNELS}
+        self._ramp_targets(targets, ramp_s=float(ramp_s))
         return True
 
     def restore_source_hv(self, ramp_s: float = 10.0) -> bool:
