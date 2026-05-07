@@ -146,7 +146,7 @@ class MagnetCalculatorDialog(QDialog):
                 b_field_tesla = math.sqrt(2.0 * total_energy_ev * q * mass_kg) / (q * radius_m)
 
             b_field_kG = b_field_tesla * 10.0  # 1 T = 10 kG
-            current_a = (b_field_kG - 0.0937) / 0.1055
+            current_a = (b_field_kG + 0.0348763) / 0.10886
 
             self._last_current_a = current_a
             self.b_field_label.setText(f"{b_field_kG:.2f} kG")

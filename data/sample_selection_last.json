@@ -1,7 +1,7 @@
 {
-  "timestamp": "2026-04-16T14:52:47",
+  "timestamp": "2026-05-07T09:41:57",
   "command": "GO",
-  "pos_idx": 3,
-  "target_steps": 246407,
-  "sample_name": "3 (C (Cu) new)"
+  "pos_idx": 76,
+  "target_steps": 95696,
+  "sample_name": "76 (MnF2 + PbF2 (Cu)(1:5))"
 }
