@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QWidget, QGroupBox, QFormLayout, QComboBox, QPushButton, QSpinBox,
-    QHBoxLayout, QLabel, QFileDialog, QMessageBox, QVBoxLayout
+    QDoubleSpinBox, QHBoxLayout, QLabel, QFileDialog, QMessageBox, QVBoxLayout
 )
 
 from gui.qt_adapter import QtBackendAdapter
@@ -75,6 +75,33 @@ class SampleSelectionPanel(QWidget):
         self.last_cmd_label.setStyleSheet("font-weight:800;")
         form.addRow("Last cmd:", self.last_cmd_label)
 
+        # Exposure / sputter-time counters
+        self.exposure_selected_label = QLabel("00:00:00")
+        self.exposure_selected_label.setStyleSheet("font-weight:800; color:#003366;")
+        form.addRow("Sample selected:", self.exposure_selected_label)
+
+        self.exposure_ionizer22_label = QLabel("00:00:00")
+        self.exposure_ionizer22_label.setStyleSheet("font-weight:800; color:#003366;")
+        form.addRow("Ionizer 22 A:", self.exposure_ionizer22_label)
+
+        self.exposure_ionizer22_oven_label = QLabel("00:00:00")
+        self.exposure_ionizer22_oven_label.setStyleSheet("font-weight:800; color:#003366;")
+        form.addRow("Ionizer 22 A + oven:", self.exposure_ionizer22_oven_label)
+
+        self.oven_threshold_spin = QDoubleSpinBox()
+        self.oven_threshold_spin.setRange(0.0, 2000.0)
+        self.oven_threshold_spin.setDecimals(1)
+        self.oven_threshold_spin.setSingleStep(10.0)
+        self.oven_threshold_spin.setValue(190.0)
+        self.oven_threshold_spin.setSuffix(" °C")
+        self.oven_threshold_spin.setKeyboardTracking(False)
+        self.oven_threshold_spin.valueChanged.connect(self.on_oven_threshold_changed)
+        form.addRow("Oven threshold:", self.oven_threshold_spin)
+
+        self.exposure_file_status_label = QLabel("inactive")
+        self.exposure_file_status_label.setStyleSheet("color:#666;")
+        form.addRow("Counter file:", self.exposure_file_status_label)
+
         gb.setLayout(form)
 
         root = QVBoxLayout(self)
@@ -84,8 +111,10 @@ class SampleSelectionPanel(QWidget):
         # load positions immediately
         self.load_sample_positions()
 
-        # subscribe stepper + last state
+        # receive backend/model updates in this panel
         self.adapter.channelUpdated.connect(self._on_update)
+
+        # subscribe stepper + last state
         for ch in [
             "stepper_connected",
             "stepper_position_meas",
@@ -95,6 +124,16 @@ class SampleSelectionPanel(QWidget):
             "sample/last_pos_idx",
             "sample/last_target_steps",
             "sample/last_sample_name",
+
+            # exposure counters
+            "sample/exposure/active",
+            "sample/exposure/active_pos_idx",
+            "sample/exposure/active_sample_name",
+            "sample/exposure/selected_hhmmss",
+            "sample/exposure/ionizer22_hhmmss",
+            "sample/exposure/ionizer22_oven_hhmmss",
+            "sample/exposure/oven_threshold_c",
+            "sample/exposure/file_status",
         ]:
             self.adapter.register_channel(ch)
 
@@ -263,22 +302,52 @@ class SampleSelectionPanel(QWidget):
         self.backend.move_sample_to_position(target)
         self.backend.sample_state.record("GO", pos_idx=pos_idx, target_steps=target, sample_name=sample_name)
 
+        try:
+            self.backend.sample_exposure.select_sample(
+                pos_idx=pos_idx,
+                sample_name=sample_name,
+                wheel_list_path=self.sample_wheel_list_path,
+                oven_threshold_c=float(self.oven_threshold_spin.value()),
+            )
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Sample exposure counter",
+                f"Sample was moved, but exposure counter could not be started:\n{e}",
+            )
+
         self.sample_status_label.setText(f"Stepper: moving to '{sample_name}' (pos {target})")
         self.sample_status_label.setStyleSheet("color:#333;")
 
     def on_sample_stop_clicked(self):
         self.backend.stop_stepper()
         self.backend.sample_state.record("STOP", pos_idx=None, target_steps=None, sample_name="")
+        try:
+            self.backend.sample_exposure.clear_active_sample(reason="STOP")
+        except Exception:
+            pass
         self.sample_status_label.setText("Stepper: stop requested")
         self.sample_status_label.setStyleSheet("color:#d68b00;")
 
     def on_sample_home_clicked(self):
         self.backend.home_stepper()
         self.backend.sample_state.record("HOME", pos_idx=None, target_steps=None, sample_name="")
+        try:
+            self.backend.sample_exposure.clear_active_sample(reason="HOME")
+        except Exception:
+            pass
         self.sample_status_label.setText("Stepper: home requested")
         self.sample_status_label.setStyleSheet("color:#333;")
 
     # -------- model updates --------
+
+    def on_oven_threshold_changed(self, value: float):
+        try:
+            self.backend.sample_exposure.set_oven_threshold(float(value))
+        except Exception:
+            pass
+
+        
     def _on_update(self, name: str, value):
         if name == "stepper_connected":
             ok = bool(value)
@@ -308,3 +377,38 @@ class SampleSelectionPanel(QWidget):
                 parts.append(str(ts))
 
             self.last_cmd_label.setText(" | ".join(parts))
+
+        if name == "sample/exposure/selected_hhmmss":
+            self.exposure_selected_label.setText(str(value or "00:00:00"))
+            return
+
+        if name == "sample/exposure/ionizer22_hhmmss":
+            self.exposure_ionizer22_label.setText(str(value or "00:00:00"))
+            return
+
+        if name == "sample/exposure/ionizer22_oven_hhmmss":
+            self.exposure_ionizer22_oven_label.setText(str(value or "00:00:00"))
+            return
+
+        if name == "sample/exposure/oven_threshold_c":
+            try:
+                v = float(value)
+            except Exception:
+                return
+            self.oven_threshold_spin.blockSignals(True)
+            try:
+                self.oven_threshold_spin.setValue(v)
+            finally:
+                self.oven_threshold_spin.blockSignals(False)
+            return
+
+        if name == "sample/exposure/file_status":
+            txt = str(value or "—")
+            self.exposure_file_status_label.setText(txt)
+            if "failed" in txt.lower() or "error" in txt.lower() or "not found" in txt.lower():
+                self.exposure_file_status_label.setStyleSheet("color:#a00;")
+            elif "saved" in txt.lower():
+                self.exposure_file_status_label.setStyleSheet("color:#060;")
+            else:
+                self.exposure_file_status_label.setStyleSheet("color:#666;")
+            return

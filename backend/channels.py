@@ -157,6 +157,24 @@ _add("sample/last_pos_idx", kind="meas", decimals=0)
 _add("sample/last_target_steps", kind="meas", unit="steps", decimals=0)
 _add("sample/last_sample_name", kind="meas")
 
+# sample exposure / sputter time counters
+_add("sample/exposure/active", kind="state")
+_add("sample/exposure/active_pos_idx", kind="meas", decimals=0)
+_add("sample/exposure/active_sample_name", kind="meas")
+_add("sample/exposure/wheel_list_path", kind="meas")
+
+_add("sample/exposure/selected_s", kind="meas", unit="s", decimals=1)
+_add("sample/exposure/selected_hhmmss", kind="meas")
+
+_add("sample/exposure/ionizer22_s", kind="meas", unit="s", decimals=1)
+_add("sample/exposure/ionizer22_hhmmss", kind="meas")
+
+_add("sample/exposure/ionizer22_oven_s", kind="meas", unit="s", decimals=1)
+_add("sample/exposure/ionizer22_oven_hhmmss", kind="meas")
+
+_add("sample/exposure/oven_threshold_c", kind="meas", unit="°C", decimals=1)
+_add("sample/exposure/file_status", kind="state")
+
 
 #magnet channels
 _add("magnet_connected", kind="state")

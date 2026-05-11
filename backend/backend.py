@@ -17,6 +17,7 @@ from .workers.gaussmeter_worker import GaussmeterWorker
 from .services.logging_service import LoggingService, LoggingConfig
 from .services.config_service import ConfigService, ConfigPayload
 from .services.rfq_service import RFQService
+from .services.sample_exposure_counter import SampleExposureCounterService
 
 SOURCE_HV_CHANNELS = (
     "cs/sputter/set_u_v",
@@ -53,6 +54,7 @@ class Backend:
 
         self.stepper = StepperWorker(self.model)
         self.sample_state = SampleSelectionStateService(self.model)
+        self.sample_exposure = SampleExposureCounterService(self.model)
 
         # Workers
         self.mqtt = MqttSignalsWorker(self.model, host=mqtt_host, port=mqtt_port)
@@ -100,7 +102,9 @@ class Backend:
         self.stepper.start()
         self.magnet.start()
         self.gaussmeter.start()
-        
+        self.sample_exposure.start()
+
+
 
         def _delayed_steerer_defaults():
             time.sleep(2)  # wait for initial MQTT values to arrive
@@ -125,6 +129,11 @@ class Backend:
         if not self._started:
             return
         self._started = False
+
+        try:
+            self.sample_exposure.stop()
+        except Exception:
+            pass
 
         try:
             self.stepper.stop()
