@@ -78,9 +78,13 @@ class PreCoolerIonOpticsPanel(_BaseIonOpticsPanel):
 class PostCoolerIonOpticsPanel(_BaseIonOpticsPanel):
     GROUP_TITLE = "Post-Cooler Ion Optics"
     ENTRIES = [
+        ("qpt/focus/set_pct", "Focus"),
+        ("qpt/astigmatism/set_pct", "Astigmatism"),
+
         ("cs/qp1/set_u_v", "Quadrupole Triplet 1"),
         ("cs/qp2/set_u_v", "Quadrupole Triplet 2"),
         ("cs/qp3/set_u_v", "Quadrupole Triplet 3"),
+
         ("steerer/2x/set_u", "Steerer X2"),
         ("steerer/2y/set_u", "Steerer Y2"),
     ]

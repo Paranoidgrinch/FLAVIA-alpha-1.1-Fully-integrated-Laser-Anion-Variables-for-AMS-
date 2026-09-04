@@ -15,11 +15,21 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from backend.channels import range_for, step_for, GROUPS, CHANNELS, unit_for
 from gui.panels.common import pretty_name
+from backend.qpt_coordinates import (
+    QPT_ASTIGMATISM_SET,
+    QPT_FOCUS_SET,
+    QPT_HARDWARE_SET_CHANNELS,
+    QPT_VIRTUAL_SET_CHANNELS,
+)
 
 
 def _pretty_label(ch: str) -> str:
     if ch == "magnet_current_set":
         return "Magnet current"
+    if ch == QPT_FOCUS_SET:
+        return "QPT Focus"
+    if ch == QPT_ASTIGMATISM_SET:
+        return "QPT Astigmatism"
     return pretty_name(ch)
 
 
@@ -31,7 +41,9 @@ def _traceable_set_channels() -> List[str]:
             c = CHANNELS.get(ch)
             if not c:
                 continue
-            if c.kind == "set" and c.topic_cmd:
+            if ch in QPT_HARDWARE_SET_CHANNELS:
+                continue
+            if c.kind == "set" and (c.topic_cmd or ch in QPT_VIRTUAL_SET_CHANNELS):
                 out.append(ch)
     if "magnet_current_set" in CHANNELS:
         out.append("magnet_current_set")
