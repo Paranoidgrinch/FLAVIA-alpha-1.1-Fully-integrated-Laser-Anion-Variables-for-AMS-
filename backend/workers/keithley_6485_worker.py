@@ -31,7 +31,7 @@ class TuneSettings:
     poll_hz: float = 15.0
     bucket_interval_s: float = 0.5
     autozero: bool = False
-    display_tau_s: float = 0.20
+    display_tau_s: float = 0.08
     range: RangeSettings = field(default_factory=RangeSettings)
     avg_filter: AvgFilterSettings = field(default_factory=AvgFilterSettings)
 
