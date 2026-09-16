@@ -38,7 +38,12 @@ class _BaseIonOpticsPanel(QWidget):
 
             if cdef.kind == "set":
                 meas = _pair_meas(ch)
-                w = AnalogControl(backend, AnalogBinding(set_ch=ch, meas_ch=meas), label=label)
+                w = AnalogControl(
+                    backend,
+                    AnalogBinding(set_ch=ch, meas_ch=meas),
+                    label=label,
+                    show_calibration=(ch == "cs/extraction/set_u_v"),
+                )
                 self.group.add_widget(w)
                 self._updaters.append(w.update_channel)
                 self.adapter.register_channel(ch)

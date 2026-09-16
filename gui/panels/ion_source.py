@@ -46,12 +46,16 @@ class IonSourcePanel(QWidget):
         v.setContentsMargins(8, 8, 8, 8)
         v.setSpacing(6)
 
-        def add_set(ch_set: str):
+        def add_set(ch_set: str, *, show_calibration: bool = False):
             cdef = CHANNELS.get(ch_set)
             if not cdef:
                 return
             meas = _pair_meas(ch_set)
-            w = AnalogControl(self.backend, AnalogBinding(set_ch=ch_set, meas_ch=meas))
+            w = AnalogControl(
+                self.backend,
+                AnalogBinding(set_ch=ch_set, meas_ch=meas),
+                show_calibration=show_calibration,
+            )
             v.addWidget(w)
             self._updaters.append(w.update_channel)
             self.adapter.register_channel(ch_set)
@@ -68,7 +72,7 @@ class IonSourcePanel(QWidget):
             self.adapter.register_channel(ch_meas)
 
         # 1) Sputter U set (+ meas)
-        add_set("cs/sputter/set_u_v")
+        add_set("cs/sputter/set_u_v", show_calibration=True)
 
         # 2) Oven I set (+ meas)
         add_set("cs/oven/set_i_a")
