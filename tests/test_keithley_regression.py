@@ -182,8 +182,8 @@ class KeithleyBucketRegressionTests(unittest.TestCase):
         self.assertEqual(self._value("keithley/stats/n"), 3)
         self.assertAlmostEqual(self._value("keithley/stats/t_s"), 0.5)
 
-    def test_current_boundary_sample_reuse_is_characterized(self):
-        """Lock current K0 behavior; K2 will intentionally change this contract."""
+    def test_boundary_sample_is_not_reused_in_next_bucket(self):
+        """K2 contract: a boundary sample belongs to exactly one bucket."""
         state = _BucketState()
         with patch(
             "backend.workers.keithley_6485_worker.time.perf_counter",
@@ -195,7 +195,7 @@ class KeithleyBucketRegressionTests(unittest.TestCase):
 
         self.assertEqual(self._value("keithley/stats/n"), 3)
         self.assertEqual(state.start, 1.0)
-        self.assertEqual(state.vals, [3.0])
+        self.assertEqual(state.vals, [])
 
     def test_trace_reset_clears_only_trace_accumulator_and_trace_channels(self):
         self.worker._stats.start = 1.0

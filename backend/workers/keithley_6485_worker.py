@@ -302,7 +302,7 @@ class Keithley6485Worker(threading.Thread):
         if now - state.start >= interval_s:
             self._emit_bucket(prefix, state, interval_s)
             state.start = now
-            state.vals = [current_nA]
+            state.vals = []
 
     def _publish_single_sample(self, current_nA: float, t_s: float) -> None:
         for prefix in ("keithley/stats", "keithley/trace"):
