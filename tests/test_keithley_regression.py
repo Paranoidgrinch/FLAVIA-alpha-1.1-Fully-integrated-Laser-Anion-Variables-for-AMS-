@@ -108,7 +108,7 @@ class KeithleyModeRegressionTests(unittest.TestCase):
                 ":SYST:AZER:STAT OFF",
                 ":SENS:AVER:COUNT 5",
                 ":SENS:AVER:TCON MOV",
-                ":SENS:AVER:STAT ON",
+                ":SENS:AVER:STAT OFF",
             ],
         )
 
