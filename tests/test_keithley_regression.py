@@ -30,6 +30,7 @@ from backend.workers.keithley_6485_worker import (
     KeithleySettings,
     RangeSettings,
     _BucketState,
+    _poll_sleep_s,
 )
 
 
@@ -241,6 +242,16 @@ class KeithleyBucketRegressionTests(unittest.TestCase):
 
         self.worker.settings.mode = "MEASURE"
         self.assertEqual(self.worker._current_poll_parameters(), ("MEASURE", 2.0, 2.0))
+
+    def test_poll_scheduler_compensates_read_time_in_tune_and_trace(self):
+        # poll_hz describes start-to-start cadence in TUNE/TRACE.
+        self.assertAlmostEqual(_poll_sleep_s("TUNE", 0.100, 0.030), 0.070, places=12)
+        self.assertAlmostEqual(_poll_sleep_s("TRACE", 0.100, 0.040), 0.060, places=12)
+        self.assertEqual(_poll_sleep_s("TRACE", 0.100, 0.120), 0.0)
+
+    def test_measure_interval_keeps_existing_post_read_sleep_semantics(self):
+        # K3 deliberately does not change MEASURE timing semantics.
+        self.assertEqual(_poll_sleep_s("MEASURE", 2.0, 0.4), 2.0)
 
 
 @unittest.skipUnless(importlib.util.find_spec("PyQt5"), "PyQt5 is required for gauge contract tests")

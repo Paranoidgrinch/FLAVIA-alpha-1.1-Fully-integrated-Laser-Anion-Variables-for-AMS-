@@ -76,6 +76,20 @@ class _BucketState:
     t0: Optional[float] = None
 
 
+def _poll_sleep_s(mode: str, period_s: float, elapsed_s: float) -> float:
+    """Return post-read sleep while preserving each mode's timing contract.
+
+    TUNE/TRACE poll_hz describes a start-to-start target period, so time already
+    spent in READ?/processing is subtracted. MEASURE deliberately keeps its
+    existing post-read interval semantics.
+    """
+    period_s = max(0.0, float(period_s))
+    if (mode or "").upper() == "MEASURE":
+        return period_s
+    elapsed_s = max(0.0, float(elapsed_s))
+    return max(0.0, period_s - elapsed_s)
+
+
 class ScpiSocket:
     LINE_ENDING = b"\n"
 
@@ -384,7 +398,8 @@ class Keithley6485Worker(threading.Thread):
                 time.sleep(0.05)
                 continue
 
-            mode, sleep_s, bucket_interval_s = self._current_poll_parameters()
+            mode, period_s, bucket_interval_s = self._current_poll_parameters()
+            cycle_started = time.perf_counter()
             try:
                 current_A = self.dev.read_current_A()
                 self.model.update("keithley/current_A", float(current_A), source="keithley")
@@ -401,7 +416,10 @@ class Keithley6485Worker(threading.Thread):
                     self._bucket_update("keithley/stats", self._stats, current_nA, bucket_interval_s)
                     self._bucket_update("keithley/trace", self._trace, current_nA, bucket_interval_s)
 
-                time.sleep(sleep_s)
+                elapsed_s = max(0.0, time.perf_counter() - cycle_started)
+                sleep_s = _poll_sleep_s(mode, period_s, elapsed_s)
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
             except Exception as e:
                 self._log(f"I/O error: {e}")
                 self._do_disconnect()
