@@ -141,6 +141,18 @@ class KeithleyZeroRegressionTests(unittest.TestCase):
         self.assertEqual(worker.model.get('keithley/trace/n').value, 0)
 
 
+class KeithleyRestartRegressionTests(unittest.TestCase):
+    def test_restart_performs_exactly_one_hardware_reset(self):
+        scpi = FakeScpi()
+        dev = Keithley6485(scpi, lambda _msg: None)
+
+        with patch("backend.workers.keithley_6485_worker.time.sleep"):
+            dev.restart(KeithleySettings())
+
+        self.assertEqual(scpi.sent.count("*RST"), 1)
+        self.assertEqual(scpi.sent[0], "*RST")
+
+
 class KeithleyModeRegressionTests(unittest.TestCase):
     def _commands_for(self, settings: KeithleySettings):
         scpi = FakeScpi()

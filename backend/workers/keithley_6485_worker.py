@@ -205,7 +205,6 @@ class Keithley6485:
         self.try_send(f":SENS:AVER:STAT {'ON' if af.enabled else 'OFF'}")
 
     def restart(self, settings: KeithleySettings) -> None:
-        self.try_send("*RST", pause_s=0.2)
         self.initialize_basic()
         self.apply_mode(settings)
 
