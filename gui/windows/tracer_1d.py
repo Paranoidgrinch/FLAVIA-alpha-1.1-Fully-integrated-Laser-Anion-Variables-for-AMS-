@@ -370,10 +370,19 @@ class Tracer1DDialog(QDialog):
                 best_v = v; best_i = i
         return best_i
 
+    def _restore_original_setpoint(self) -> None:
+        if self.applied_value is not None or self.original_value is None or self.param is None:
+            return
+        try:
+            self._set_param_value(self.param.channel, float(self.original_value))
+        except Exception:
+            pass
+
     def _finish_trace(self):
         self.tracing_active = False
         self.timer.stop()
         self._restore_keithley_settings()
+        self._restore_original_setpoint()
         self.stop_btn.setEnabled(False); self.start_btn.setEnabled(True); self.export_btn.setEnabled(bool(self.x_values))
         best_i = self._best_index()
         if best_i is not None:
@@ -388,6 +397,7 @@ class Tracer1DDialog(QDialog):
         self.tracing_active = False
         self.timer.stop()
         self._restore_keithley_settings()
+        self._restore_original_setpoint()
         self.stop_btn.setEnabled(False); self.start_btn.setEnabled(True); self.export_btn.setEnabled(bool(self.x_values))
         best_i = self._best_index()
         if best_i is not None:
@@ -482,10 +492,6 @@ class Tracer1DDialog(QDialog):
             self.tracing_active = False
             self.timer.stop()
         self._restore_keithley_settings()
-        if self.applied_value is None and self.original_value is not None and self.param is not None:
-            try:
-                self._set_param_value(self.param.channel, float(self.original_value))
-            except Exception:
-                pass
+        self._restore_original_setpoint()
         self._reset_ui_after_run()
         super().closeEvent(event)

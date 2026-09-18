@@ -381,8 +381,19 @@ class Tracer2DDialog(QDialog):
         self._draw_heatmap()
         self._next_point()
 
+    def _restore_original_setpoints(self) -> None:
+        if self.applied is not None:
+            return
+        for param, value in ((self.param1, self.orig1), (self.param2, self.orig2)):
+            if param is None or value is None:
+                continue
+            try:
+                self._set_param_value(param.channel, float(value))
+            except Exception:
+                pass
+
     def _finish(self):
-        self.running = False; self.timer.stop(); self._restore_keithley_settings()
+        self.running = False; self.timer.stop(); self._restore_keithley_settings(); self._restore_original_setpoints()
         self.btn_stop.setEnabled(False); self.btn_start.setEnabled(True); self.btn_export.setEnabled(self._has_any_data())
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
@@ -394,7 +405,7 @@ class Tracer2DDialog(QDialog):
     def stop_trace(self):
         if not self.running:
             return
-        self.running = False; self.timer.stop(); self._restore_keithley_settings()
+        self.running = False; self.timer.stop(); self._restore_keithley_settings(); self._restore_original_setpoints()
         self.btn_stop.setEnabled(False); self.btn_start.setEnabled(True); self.btn_export.setEnabled(self._has_any_data())
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
@@ -495,11 +506,6 @@ class Tracer2DDialog(QDialog):
         if self.running:
             self.running = False; self.timer.stop()
         self._restore_keithley_settings()
-        if self.applied is None and self.param1 is not None and self.param2 is not None and self.orig1 is not None and self.orig2 is not None:
-            try:
-                self._set_param_value(self.param1.channel, float(self.orig1))
-                self._set_param_value(self.param2.channel, float(self.orig2))
-            except Exception:
-                pass
+        self._restore_original_setpoints()
         self._reset_ui_after_run()
         super().closeEvent(event)
