@@ -19,6 +19,26 @@ class AvgFilterSettings:
     tcon: str = "MOV"  # MOV or REP
 
 
+KEITHLEY_6485_RANGES_NA = (
+    2.0,
+    20.0,
+    200.0,
+    2_000.0,
+    20_000.0,
+    200_000.0,
+    2_000_000.0,
+    20_000_000.0,
+)
+
+
+def _select_fixed_range_nA(requested_nA: float) -> float:
+    requested = abs(float(requested_nA))
+    for full_scale in KEITHLEY_6485_RANGES_NA:
+        if requested <= full_scale:
+            return full_scale
+    return KEITHLEY_6485_RANGES_NA[-1]
+
+
 @dataclass
 class RangeSettings:
     auto: bool = True
@@ -189,7 +209,8 @@ class Keithley6485:
             self.try_send(":SENS:CURR:RANG:AUTO ON")
         else:
             self.try_send(":SENS:CURR:RANG:AUTO OFF")
-            fixed_A = max(1e-15, float(s.range.fixed_range_nA) * 1e-9)
+            fixed_range_nA = _select_fixed_range_nA(s.range.fixed_range_nA)
+            fixed_A = fixed_range_nA * 1e-9
             self.try_send(f":SENS:CURR:RANG {fixed_A:.6e}")
 
         nplc = max(0.0001, float(s.nplc))

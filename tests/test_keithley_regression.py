@@ -31,6 +31,7 @@ from backend.workers.keithley_6485_worker import (
     RangeSettings,
     _BucketState,
     _poll_sleep_s,
+    _select_fixed_range_nA,
 )
 
 
@@ -151,6 +152,28 @@ class KeithleyRestartRegressionTests(unittest.TestCase):
 
         self.assertEqual(scpi.sent.count("*RST"), 1)
         self.assertEqual(scpi.sent[0], "*RST")
+
+
+class KeithleyRangeRegressionTests(unittest.TestCase):
+    def test_requested_fixed_range_snaps_up_to_real_6485_range(self):
+        self.assertEqual(_select_fixed_range_nA(0.05), 2.0)
+        self.assertEqual(_select_fixed_range_nA(2.0), 2.0)
+        self.assertEqual(_select_fixed_range_nA(2.1), 20.0)
+        self.assertEqual(_select_fixed_range_nA(100.0), 200.0)
+        self.assertEqual(_select_fixed_range_nA(2000.0), 2000.0)
+
+    def test_requested_fixed_range_is_clamped_to_20mA_maximum(self):
+        self.assertEqual(_select_fixed_range_nA(1e9), 20_000_000.0)
+
+    def test_fixed_range_command_uses_real_hardware_range(self):
+        settings = KeithleySettings()
+        settings.mode = "TUNE"
+        settings.tune.range = RangeSettings(auto=False, fixed_range_nA=100.0)
+        scpi = FakeScpi()
+        dev = Keithley6485(scpi, lambda _msg: None)
+        dev.apply_mode(settings)
+        self.assertEqual(scpi.sent[0], ":SENS:CURR:RANG:AUTO OFF")
+        self.assertEqual(scpi.sent[1], ":SENS:CURR:RANG 2.000000e-07")
 
 
 class KeithleyModeRegressionTests(unittest.TestCase):
