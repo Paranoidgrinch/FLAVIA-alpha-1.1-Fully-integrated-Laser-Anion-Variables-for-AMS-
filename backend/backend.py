@@ -151,6 +151,7 @@ class Backend:
         if not self._started:
             return
         self._started = False
+        self._cancel_active_ramp()
 
         try:
             self.sample_exposure.stop()
@@ -158,19 +159,27 @@ class Backend:
             pass
 
         try:
-            self.stepper.stop()
+            self.stepper.shutdown()
         except Exception:
             pass
 
         try:
-            self.magnet.stop()
+            self.magnet.shutdown()
         except Exception:
             pass
 
         try:
-            self.gaussmeter.stop()
+            self.gaussmeter.shutdown()
         except Exception:
             pass
+
+        # All three workers use shutdown() rather than stop(). Signal all first,
+        # then wait briefly so their sockets can close before the process exits.
+        for w in (self.stepper, self.magnet, self.gaussmeter):
+            try:
+                w.join(timeout=3.0)
+            except Exception:
+                pass
 
         try:
             self.logging.shutdown()
