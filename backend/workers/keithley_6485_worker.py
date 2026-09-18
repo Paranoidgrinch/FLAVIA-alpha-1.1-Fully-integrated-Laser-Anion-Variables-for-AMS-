@@ -167,16 +167,14 @@ class Keithley6485:
     def initialize_basic(self) -> None:
         cmds = [
             "*RST",
-            ":SYST:ZCH ON",
-            ":SYST:ZCOR ON",
             ":FORM:ELEM READ",
             ":SENS:FUNC 'CURR'",
             ":SENS:CURR:RANG:AUTO ON",
             ":SENS:CURR:NPLC 0.1",
-            ":SYST:ZCH OFF",
         ]
         for c in cmds:
             self.try_send(c, pause_s=0.3)
+        self.zero_cycle()
 
     def apply_mode(self, settings: KeithleySettings) -> None:
         mode = (settings.mode or "TUNE").upper()
@@ -212,9 +210,16 @@ class Keithley6485:
         self.apply_mode(settings)
 
     def zero_cycle(self) -> None:
-        self.try_send(":SYST:ZCH ON", pause_s=0.2)
-        self.try_send(":SYST:ZCOR ON", pause_s=0.2)
-        self.try_send(":SYST:ZCH OFF", pause_s=0.2)
+        cmds = [
+            ":SYST:ZCH ON",
+            ":SYST:ZCOR OFF",
+            "INIT",
+            ":SYST:ZCOR:ACQ",
+            ":SYST:ZCH OFF",
+            ":SYST:ZCOR ON",
+        ]
+        for c in cmds:
+            self.try_send(c, pause_s=0.2)
 
 
 class Keithley6485Worker(threading.Thread):
@@ -358,6 +363,14 @@ class Keithley6485Worker(threading.Thread):
         self._set_connected(False)
         self._log("Disconnected.")
 
+    def _perform_zero_cycle(self) -> None:
+        if not self.connected or not self.dev:
+            return
+        self._log("Zero cycle ...")
+        self.dev.zero_cycle()
+        self._reset_all_accumulators()
+        self._log("Zero cycle done.")
+
     def run(self) -> None:
         while True:
             try:
@@ -385,10 +398,7 @@ class Keithley6485Worker(threading.Thread):
                             self._reset_all_accumulators()
                             self._log("Restart done.")
                     elif cmd == "zero":
-                        if self.connected and self.dev:
-                            self._log("Zero cycle ...")
-                            self.dev.zero_cycle()
-                            self._log("Zero cycle done.")
+                        self._perform_zero_cycle()
                     elif cmd == "trace_reset":
                         self._reset_trace_accumulator()
             except queue.Empty:

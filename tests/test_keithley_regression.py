@@ -73,6 +73,74 @@ class KeithleyReadRegressionTests(unittest.TestCase):
         self.assertTrue(any("Parse error for READ?" in msg for msg in logs))
 
 
+class KeithleyZeroRegressionTests(unittest.TestCase):
+    def test_zero_cycle_acquires_fresh_correction_before_enabling_it(self):
+        scpi = FakeScpi()
+        dev = Keithley6485(scpi, lambda _msg: None)
+
+        with patch('backend.workers.keithley_6485_worker.time.sleep'):
+            dev.zero_cycle()
+
+        self.assertEqual(
+            scpi.sent,
+            [
+                ':SYST:ZCH ON',
+                ':SYST:ZCOR OFF',
+                'INIT',
+                ':SYST:ZCOR:ACQ',
+                ':SYST:ZCH OFF',
+                ':SYST:ZCOR ON',
+            ],
+        )
+
+    def test_initialize_basic_acquires_zero_before_enabling_correction(self):
+        scpi = FakeScpi()
+        dev = Keithley6485(scpi, lambda _msg: None)
+
+        with patch('backend.workers.keithley_6485_worker.time.sleep'):
+            dev.initialize_basic()
+
+        self.assertEqual(
+            scpi.sent,
+            [
+                '*RST',
+                ':FORM:ELEM READ',
+                ":SENS:FUNC 'CURR'",
+                ':SENS:CURR:RANG:AUTO ON',
+                ':SENS:CURR:NPLC 0.1',
+                ':SYST:ZCH ON',
+                ':SYST:ZCOR OFF',
+                'INIT',
+                ':SYST:ZCOR:ACQ',
+                ':SYST:ZCH OFF',
+                ':SYST:ZCOR ON',
+            ],
+        )
+
+    def test_worker_zero_resets_software_accumulators(self):
+        worker = Keithley6485Worker(DataModel())
+        calls = []
+        worker.connected = True
+        worker.dev = SimpleNamespace(zero_cycle=lambda: calls.append('zero'))
+        worker._stats.start = 1.0
+        worker._stats.t0 = 1.0
+        worker._stats.vals = [10.0, 11.0]
+        worker._trace.start = 2.0
+        worker._trace.t0 = 2.0
+        worker._trace.vals = [20.0, 21.0]
+
+        worker._perform_zero_cycle()
+
+        self.assertEqual(calls, ['zero'])
+        self.assertIsNone(worker._stats.start)
+        self.assertIsNone(worker._stats.t0)
+        self.assertEqual(worker._stats.vals, [])
+        self.assertIsNone(worker._trace.start)
+        self.assertIsNone(worker._trace.t0)
+        self.assertEqual(worker._trace.vals, [])
+        self.assertEqual(worker.model.get('keithley/trace/n').value, 0)
+
+
 class KeithleyModeRegressionTests(unittest.TestCase):
     def _commands_for(self, settings: KeithleySettings):
         scpi = FakeScpi()
