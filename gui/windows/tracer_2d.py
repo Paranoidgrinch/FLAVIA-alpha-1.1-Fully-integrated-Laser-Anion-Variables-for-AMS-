@@ -276,6 +276,14 @@ class Tracer2DDialog(QDialog):
         if dwell_s < float(k_settings.trace.bucket_interval_s):
             QMessageBox.warning(self, "2D Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
             return
+
+        from backend.trace_timing import build_trace_point_timing
+        timing = build_trace_point_timing(
+            dwell_s,
+            float(k_settings.trace.bucket_interval_s),
+            float(k_settings.trace.poll_hz),
+        )
+
         self._saved_keithley_settings = copy.deepcopy(k_settings)
         k_settings.mode = "TRACE"
         self.backend.apply_keithley_settings(k_settings)
@@ -285,7 +293,13 @@ class Tracer2DDialog(QDialog):
         self.applied = None
         self.grid = [[float("nan") for _ in self.v1] for __ in self.v2]
         self.i = -1; self.j = -1; self.sel_i = None; self.sel_j = None
-        self.dwell_s = dwell_s; self.elapsed_s = 0.0; self.running = True
+        self.dwell_s = dwell_s
+        self.settle_s = timing.settle_s
+        self.measure_s = timing.measure_s
+        self.measure_timeout_s = timing.timeout_s
+        self._tick_dt_s = 0.1
+        self.elapsed_s = 0.0
+        self.running = True
         self.btn_start.setEnabled(False); self.btn_stop.setEnabled(True); self.btn_apply.setEnabled(False); self.btn_export.setEnabled(False)
         self._update_axes_labels(); self._draw_heatmap()
         self.timer.start(int(self._tick_dt_s * 1000))
@@ -300,23 +314,55 @@ class Tracer2DDialog(QDialog):
         try:
             self._set_param_value(self.param2.channel, float(self.v2[self.j]))
             self._set_param_value(self.param1.channel, float(self.v1[self.i]))
-            self.backend.reset_keithley_trace()
         except Exception:
             pass
         self.elapsed_s = 0.0
-        self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting...")
+        self.point_phase = "settle"
+        if self.settle_s <= 0.0:
+            try:
+                self.backend.reset_keithley_trace()
+            except Exception:
+                pass
+            self.point_phase = "measure"
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
+        else:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling...")
 
     def _tick(self):
         if not self.running:
             return
+
         self.elapsed_s += self._tick_dt_s
-        rem = max(0.0, self.dwell_s - self.elapsed_s)
-        self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting... ({rem:.1f}s)")
-        if self.elapsed_s < self.dwell_s:
+
+        if self.point_phase == "settle":
+            rem = max(0.0, self.settle_s - self.elapsed_s)
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling... ({rem:.1f}s)")
+            if self.elapsed_s < self.settle_s:
+                return
+            try:
+                self.backend.reset_keithley_trace()
+            except Exception:
+                pass
+            self.point_phase = "measure"
+            self.elapsed_s = 0.0
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
             return
+
+        if self.point_phase != "measure":
+            return
+
+        rem = max(0.0, self.measure_s - self.elapsed_s)
+        if self.elapsed_s < self.measure_s:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring... ({rem:.1f}s)")
+            return
+
         y = self._get_trace_mean()
+        if y is None and self.elapsed_s < self.measure_timeout_s:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for complete Keithley bucket...")
+            return
         if y is None:
             y = float("nan")
+
         self.grid[self.j][self.i] = float(y)
         self._draw_heatmap()
         self._next_point()
