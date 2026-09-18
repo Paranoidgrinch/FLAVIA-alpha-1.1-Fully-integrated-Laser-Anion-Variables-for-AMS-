@@ -292,7 +292,7 @@ class Tracer2DDialog(QDialog):
         self.orig1 = self._get_set_value(self.param1.channel); self.orig2 = self._get_set_value(self.param2.channel)
         self.applied = None
         self.grid = [[float("nan") for _ in self.v1] for __ in self.v2]
-        self.i = -1; self.j = -1; self.sel_i = None; self.sel_j = None
+        self.i = -1; self.j = 0; self.sel_i = None; self.sel_j = None
         self.dwell_s = dwell_s
         self.settle_s = timing.settle_s
         self.measure_s = timing.measure_s
