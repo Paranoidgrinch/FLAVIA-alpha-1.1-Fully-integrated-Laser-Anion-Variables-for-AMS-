@@ -22,6 +22,8 @@ from backend.workers.keithley_6485_worker import (
     RangeSettings,
     TraceSettings,
     TuneSettings,
+    KEITHLEY_6485_RANGES_NA,
+    _select_fixed_range_nA,
 )
 
 
@@ -70,11 +72,19 @@ class _ModeBox(QGroupBox):
         self.cb_auto.setChecked(bool(settings_obj.range.auto))
         form.addRow("", self.cb_auto)
 
-        self.sb_fixed = QDoubleSpinBox()
-        self.sb_fixed.setRange(0.001, 1e9)
-        self.sb_fixed.setDecimals(3)
-        self.sb_fixed.setValue(float(settings_obj.range.fixed_range_nA))
-        form.addRow("Fixed range [nA]:", self.sb_fixed)
+        self.cb_fixed = QComboBox()
+        for value_nA in KEITHLEY_6485_RANGES_NA:
+            if value_nA >= 1_000_000.0:
+                label = f"{value_nA / 1_000_000.0:g} mA"
+            elif value_nA >= 1_000.0:
+                label = f"{value_nA / 1_000.0:g} µA"
+            else:
+                label = f"{value_nA:g} nA"
+            self.cb_fixed.addItem(label, userData=float(value_nA))
+        selected_nA = _select_fixed_range_nA(settings_obj.range.fixed_range_nA)
+        selected_index = list(KEITHLEY_6485_RANGES_NA).index(selected_nA)
+        self.cb_fixed.setCurrentIndex(selected_index)
+        form.addRow("Fixed range:", self.cb_fixed)
 
         self.cb_avg = QCheckBox("Enable averaging filter")
         self.cb_avg.setChecked(bool(settings_obj.avg_filter.enabled))
@@ -90,11 +100,11 @@ class _ModeBox(QGroupBox):
         self.cb_avg_tcon.setCurrentText((settings_obj.avg_filter.tcon or "MOV").upper())
         form.addRow("Avg type:", self.cb_avg_tcon)
 
-        self.cb_auto.toggled.connect(self.sb_fixed.setDisabled)
-        self.sb_fixed.setEnabled(not self.cb_auto.isChecked())
+        self.cb_auto.toggled.connect(self.cb_fixed.setDisabled)
+        self.cb_fixed.setEnabled(not self.cb_auto.isChecked())
 
     def build_range(self) -> RangeSettings:
-        return RangeSettings(auto=bool(self.cb_auto.isChecked()), fixed_range_nA=float(self.sb_fixed.value()))
+        return RangeSettings(auto=bool(self.cb_auto.isChecked()), fixed_range_nA=float(self.cb_fixed.currentData()))
 
     def build_avg(self) -> AvgFilterSettings:
         return AvgFilterSettings(
