@@ -347,7 +347,8 @@ class Backend:
             return
 
         self._cancel_active_ramp()
-        self._ramp_cancel = threading.Event()
+        cancel_event = threading.Event()
+        self._ramp_cancel = cancel_event
 
         starts = {k: self._channel_numeric_value(k, fallback=float(v)) for k, v in targets.items()}
 
@@ -356,7 +357,7 @@ class Backend:
 
         def ramp_thread():
             for i in range(steps + 1):
-                if self._ramp_cancel.is_set():
+                if cancel_event.is_set():
                     return
 
                 frac = i / steps
@@ -453,12 +454,9 @@ class Backend:
             return
 
         # cancel previous ramp
-        try:
-            self._ramp_cancel.set()
-        except Exception:
-            pass
-
-        self._ramp_cancel = threading.Event()
+        self._cancel_active_ramp()
+        cancel_event = threading.Event()
+        self._ramp_cancel = cancel_event
 
         # snapshot start values
         def current_value(key: str) -> float:
@@ -507,7 +505,7 @@ class Backend:
 
         def ramp_thread():
             for i in range(steps + 1):
-                if self._ramp_cancel.is_set():
+                if cancel_event.is_set():
                     return
                 frac = i / steps
 
