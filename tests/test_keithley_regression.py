@@ -259,6 +259,31 @@ class KeithleyModeRegressionTests(unittest.TestCase):
         self.assertIsNot(queued, settings)
 
 
+class KeithleyTraceResetHandshakeTests(unittest.TestCase):
+    def test_trace_reset_requests_get_monotonic_ids(self):
+        worker = Keithley6485Worker(DataModel())
+        first = worker.cmd_reset_trace()
+        second = worker.cmd_reset_trace()
+        self.assertEqual((first, second), (1, 2))
+        self.assertEqual(worker._cmdq.get_nowait(), ("trace_reset", 1))
+        self.assertEqual(worker._cmdq.get_nowait(), ("trace_reset", 2))
+
+    def test_trace_reset_ack_is_published_after_actual_reset(self):
+        worker = Keithley6485Worker(DataModel())
+        ack = worker.model.get("keithley/trace/reset_ack")
+        self.assertIsNotNone(ack)
+        self.assertEqual(int(ack.value), 0)
+        worker._trace.start = 1.0
+        worker._trace.t0 = 1.0
+        worker._trace.vals = [10.0, 20.0]
+        worker.model.update("keithley/trace/n", 2, source="test")
+        worker._perform_trace_reset(7)
+        self.assertIsNone(worker._trace.start)
+        self.assertEqual(worker._trace.vals, [])
+        self.assertEqual(worker.model.get("keithley/trace/n").value, 0)
+        self.assertEqual(worker.model.get("keithley/trace/reset_ack").value, 7)
+
+
 class KeithleyBucketRegressionTests(unittest.TestCase):
     def setUp(self):
         self.model = DataModel()

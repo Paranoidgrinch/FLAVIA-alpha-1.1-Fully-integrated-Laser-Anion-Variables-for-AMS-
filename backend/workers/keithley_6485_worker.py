@@ -255,10 +255,12 @@ class Keithley6485Worker(threading.Thread):
 
         self._stats = _BucketState()
         self._trace = _BucketState()
+        self._trace_reset_request_id = 0
 
         self.model.update("keithley/connected", False, source="keithley", quality="bad")
         self.model.update("keithley/mode", (self.settings.mode or "TUNE").upper(), source="keithley")
         self._publish_trace_reset_state()
+        self.model.update("keithley/trace/reset_ack", 0, source="keithley")
 
     def _log(self, msg: str) -> None:
         self.model.update("keithley/log", msg, source="keithley")
@@ -285,8 +287,11 @@ class Keithley6485Worker(threading.Thread):
     def cmd_zero(self) -> None:
         self._cmdq.put(("zero", None))
 
-    def cmd_reset_trace(self) -> None:
-        self._cmdq.put(("trace_reset", None))
+    def cmd_reset_trace(self) -> int:
+        self._trace_reset_request_id += 1
+        request_id = self._trace_reset_request_id
+        self._cmdq.put(("trace_reset", request_id))
+        return request_id
 
     def _set_connected(self, ok: bool) -> None:
         self.connected = ok
@@ -314,6 +319,10 @@ class Keithley6485Worker(threading.Thread):
     def _reset_trace_accumulator(self) -> None:
         self._reset_bucket(self._trace)
         self._publish_trace_reset_state()
+
+    def _perform_trace_reset(self, request_id: int) -> None:
+        self._reset_trace_accumulator()
+        self.model.update("keithley/trace/reset_ack", int(request_id), source="keithley")
 
     def _emit_bucket(self, prefix: str, state: _BucketState, interval_s: float) -> None:
         vals = state.vals
@@ -420,7 +429,7 @@ class Keithley6485Worker(threading.Thread):
                     elif cmd == "zero":
                         self._perform_zero_cycle()
                     elif cmd == "trace_reset":
-                        self._reset_trace_accumulator()
+                        self._perform_trace_reset(int(payload))
             except queue.Empty:
                 pass
 

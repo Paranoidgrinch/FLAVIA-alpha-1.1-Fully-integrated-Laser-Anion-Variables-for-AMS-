@@ -298,11 +298,13 @@ class Tracer1DDialog(QDialog):
         self.step_phase = "settle"
         if self.settle_time <= 0.0:
             try:
-                self.backend.reset_keithley_trace()
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
             except Exception as e:
                 self.status_label.setText(f"Keithley trace reset failed: {e}")
-            self.step_phase = "measure"
-            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring...")
+                self._trace_reset_request_id = None
+                return
+            self.step_phase = "reset_wait"
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
         else:
             self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: set={value:.3f}, settling...")
 
@@ -318,9 +320,21 @@ class Tracer1DDialog(QDialog):
             if self.step_elapsed < self.settle_time:
                 return
             try:
-                self.backend.reset_keithley_trace()
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
             except Exception as e:
                 self.status_label.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.step_phase = "reset_wait"
+            self.step_elapsed = 0.0
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+            return
+
+        if self.step_phase == "reset_wait":
+            request_id = getattr(self, "_trace_reset_request_id", None)
+            if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
+                self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+                return
             self.step_phase = "measure"
             self.step_elapsed = 0.0
             self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring...")

@@ -222,7 +222,15 @@ class Backend:
 
 
     def reset_keithley_trace(self):
-        self.keithley.cmd_reset_trace()
+        return self.keithley.cmd_reset_trace()
+
+    def keithley_trace_reset_acknowledged(self, request_id) -> bool:
+        ch = self.model.get("keithley/trace/reset_ack")
+        try:
+            ack = int(ch.value) if ch is not None and ch.value is not None else 0
+            return ack >= int(request_id)
+        except (TypeError, ValueError):
+            return False
     # ----------------------
     # Virtual QPT coordinates
     # ----------------------

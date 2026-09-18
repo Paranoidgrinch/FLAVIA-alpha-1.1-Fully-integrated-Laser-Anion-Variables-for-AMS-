@@ -320,11 +320,13 @@ class Tracer2DDialog(QDialog):
         self.point_phase = "settle"
         if self.settle_s <= 0.0:
             try:
-                self.backend.reset_keithley_trace()
-            except Exception:
-                pass
-            self.point_phase = "measure"
-            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.point_phase = "reset_wait"
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
         else:
             self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling...")
 
@@ -340,9 +342,21 @@ class Tracer2DDialog(QDialog):
             if self.elapsed_s < self.settle_s:
                 return
             try:
-                self.backend.reset_keithley_trace()
-            except Exception:
-                pass
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.point_phase = "reset_wait"
+            self.elapsed_s = 0.0
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+            return
+
+        if self.point_phase == "reset_wait":
+            request_id = getattr(self, "_trace_reset_request_id", None)
+            if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
+                self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+                return
             self.point_phase = "measure"
             self.elapsed_s = 0.0
             self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
