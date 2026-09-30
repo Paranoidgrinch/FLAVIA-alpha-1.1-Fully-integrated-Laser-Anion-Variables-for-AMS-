@@ -475,7 +475,9 @@ class RFQWorker(QtCore.QObject):
                 continue
 
             self.sweepProgress.emit(idx + 1, len(values), L_uH)
-            time.sleep(dwell_s)
+            if self._sweep_cancel_event.wait(dwell_s):
+                self.sweepLog.emit("Sweep cancelled by user.")
+                break
 
             if measure_scope:
                 try:

@@ -13,6 +13,11 @@ class RfqSweepCancelTests(unittest.TestCase):
         worker.cancel_sweep()
         self.assertTrue(worker._sweep_cancel_event.is_set())
 
+    def test_cancel_event_can_interrupt_dwell_immediately(self):
+        worker = RFQWorker()
+        worker._sweep_cancel_event.set()
+        self.assertTrue(worker._sweep_cancel_event.wait(10.0))
+
     def test_service_cancel_reaches_worker_directly(self):
         calls=[]
         service=SimpleNamespace(
