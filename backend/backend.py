@@ -136,6 +136,11 @@ class Backend:
         # logging thread starts lazily on first start_logging()
 
     def apply_default_steerer_values_if_empty(self) -> None:
+        # The delayed startup task may wake after Backend.stop(). Never publish
+        # default hardware setpoints once the backend is no longer running.
+        if not self._started:
+            return
+
         for key in self._default_steerer_channels:
             ch = self.model.get(key)
             if ch is None:
