@@ -1,11 +1,63 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional
 
 from PyQt5.QtCore import Qt, QSize
 from PyQt5.QtGui import QPainter, QPen, QFont, QColor
 from PyQt5.QtWidgets import QDialog, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
+
+
+AUTO_SCALE_UP_FRACTION = 0.90
+AUTO_SCALE_DOWN_FRACTION = 0.20
+AUTO_SCALE_DOWN_HOLD_S = 0.50
+AUTO_SCALE_TARGET_FRACTION = 0.80
+
+
+def _range_max_nA(range_spec) -> float:
+    _mn, mx, unit = range_spec
+    if unit == "pA":
+        return float(mx) / 1000.0
+    if unit == "nA":
+        return float(mx)
+    return float(mx) * 1000.0
+
+
+def _best_auto_range_index(current_nA: float, ranges) -> int:
+    value_nA = abs(float(current_nA))
+    for idx, spec in enumerate(ranges):
+        if value_nA <= AUTO_SCALE_TARGET_FRACTION * _range_max_nA(spec):
+            return idx
+    return len(ranges) - 1
+
+
+def _auto_scale_step(current_nA: float, ranges, current_idx: int, down_since, now: float):
+    """Return (range_idx, down_since) for display-only autoscaling.
+
+    Upscaling is immediate near full scale. Downscaling requires the signal to
+    stay well below full scale for a short hold time, preventing visible range
+    chatter while tuning.
+    """
+    if not ranges:
+        return 0, None
+
+    idx = max(0, min(int(current_idx), len(ranges) - 1))
+    value_nA = abs(float(current_nA))
+    max_nA = _range_max_nA(ranges[idx])
+
+    if value_nA > AUTO_SCALE_UP_FRACTION * max_nA and idx < len(ranges) - 1:
+        target = _best_auto_range_index(value_nA, ranges)
+        return max(idx + 1, target), None
+
+    if value_nA < AUTO_SCALE_DOWN_FRACTION * max_nA and idx > 0:
+        if down_since is None:
+            return idx, float(now)
+        if float(now) - float(down_since) >= AUTO_SCALE_DOWN_HOLD_S:
+            return min(idx, _best_auto_range_index(value_nA, ranges)), None
+        return idx, down_since
+
+    return idx, None
 
 
 class GaugeWidget(QWidget):
@@ -96,15 +148,19 @@ class KeithleyGaugeWindow(QDialog):
             (0, 30, "µA"),
         ]
         self.range_idx = 6
+        self.auto_scale = False
+        self._auto_down_since: Optional[float] = None
         self.last_nA: Optional[float] = None
 
         layout = QVBoxLayout()
         top = QHBoxLayout()
         top.addWidget(QLabel("Scale:"))
         self.cb_range = QComboBox()
+        self.cb_range.addItem("Auto", userData="auto")
         for i, (_, max_val, unit) in enumerate(self.ranges):
             self.cb_range.addItem(f"0–{max_val} {unit}", userData=i)
-        self.cb_range.setCurrentIndex(self.range_idx)
+        # Preserve the previous 100 nA manual default. Auto is an explicit option.
+        self.cb_range.setCurrentIndex(self.range_idx + 1)
         self.cb_range.currentIndexChanged.connect(self.on_range_changed)
         top.addWidget(self.cb_range)
         top.addStretch()
@@ -116,10 +172,24 @@ class KeithleyGaugeWindow(QDialog):
         layout.addWidget(self.gauge)
         self.setLayout(layout)
 
-    def on_range_changed(self, idx: int) -> None:
-        self.range_idx = idx
-        mn, mx, unit = self.ranges[idx]
+    def _apply_range(self) -> None:
+        mn, mx, unit = self.ranges[self.range_idx]
         self.gauge.set_range(mn, mx, unit)
+
+    def on_range_changed(self, combo_idx: int) -> None:
+        data = self.cb_range.itemData(combo_idx)
+        self._auto_down_since = None
+        if data == "auto":
+            self.auto_scale = True
+            if self.last_nA is not None:
+                self.range_idx = _best_auto_range_index(self.last_nA, self.ranges)
+        else:
+            self.auto_scale = False
+            try:
+                self.range_idx = int(data)
+            except (TypeError, ValueError):
+                return
+        self._apply_range()
         if self.last_nA is not None:
             self.update_current(self.last_nA)
 
@@ -132,6 +202,18 @@ class KeithleyGaugeWindow(QDialog):
 
     def update_current(self, current_nA: float) -> None:
         self.last_nA = float(current_nA)
+        if self.auto_scale:
+            new_idx, self._auto_down_since = _auto_scale_step(
+                self.last_nA,
+                self.ranges,
+                self.range_idx,
+                self._auto_down_since,
+                time.monotonic(),
+            )
+            if new_idx != self.range_idx:
+                self.range_idx = new_idx
+                self._apply_range()
+
         mn, mx, unit = self.ranges[self.range_idx]
         if unit == "pA":
             val = current_nA * 1000.0

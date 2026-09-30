@@ -38,7 +38,12 @@ class _BaseIonOpticsPanel(QWidget):
 
             if cdef.kind == "set":
                 meas = _pair_meas(ch)
-                w = AnalogControl(backend, AnalogBinding(set_ch=ch, meas_ch=meas), label=label)
+                w = AnalogControl(
+                    backend,
+                    AnalogBinding(set_ch=ch, meas_ch=meas),
+                    label=label,
+                    show_calibration=(ch == "cs/extraction/set_u_v"),
+                )
                 self.group.add_widget(w)
                 self._updaters.append(w.update_channel)
                 self.adapter.register_channel(ch)
@@ -78,9 +83,13 @@ class PreCoolerIonOpticsPanel(_BaseIonOpticsPanel):
 class PostCoolerIonOpticsPanel(_BaseIonOpticsPanel):
     GROUP_TITLE = "Post-Cooler Ion Optics"
     ENTRIES = [
+        ("qpt/focus/set_pct", "Focus"),
+        ("qpt/astigmatism/set_pct", "Astigmatism"),
+
         ("cs/qp1/set_u_v", "Quadrupole Triplet 1"),
         ("cs/qp2/set_u_v", "Quadrupole Triplet 2"),
         ("cs/qp3/set_u_v", "Quadrupole Triplet 3"),
+
         ("steerer/2x/set_u", "Steerer X2"),
         ("steerer/2y/set_u", "Steerer Y2"),
     ]

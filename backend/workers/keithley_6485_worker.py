@@ -19,6 +19,26 @@ class AvgFilterSettings:
     tcon: str = "MOV"  # MOV or REP
 
 
+KEITHLEY_6485_RANGES_NA = (
+    2.0,
+    20.0,
+    200.0,
+    2_000.0,
+    20_000.0,
+    200_000.0,
+    2_000_000.0,
+    20_000_000.0,
+)
+
+
+def _select_fixed_range_nA(requested_nA: float) -> float:
+    requested = abs(float(requested_nA))
+    for full_scale in KEITHLEY_6485_RANGES_NA:
+        if requested <= full_scale:
+            return full_scale
+    return KEITHLEY_6485_RANGES_NA[-1]
+
+
 @dataclass
 class RangeSettings:
     auto: bool = True
@@ -31,7 +51,7 @@ class TuneSettings:
     poll_hz: float = 15.0
     bucket_interval_s: float = 0.5
     autozero: bool = False
-    display_tau_s: float = 0.20
+    display_tau_s: float = 0.08
     range: RangeSettings = field(default_factory=RangeSettings)
     avg_filter: AvgFilterSettings = field(default_factory=AvgFilterSettings)
 
@@ -44,7 +64,7 @@ class TraceSettings:
     autozero: bool = False
     display_tau_s: float = 0.45
     range: RangeSettings = field(default_factory=lambda: RangeSettings(auto=True, fixed_range_nA=100.0))
-    avg_filter: AvgFilterSettings = field(default_factory=lambda: AvgFilterSettings(enabled=True, count=5, tcon="MOV"))
+    avg_filter: AvgFilterSettings = field(default_factory=lambda: AvgFilterSettings(enabled=False, count=5, tcon="MOV"))
 
 
 @dataclass
@@ -74,6 +94,20 @@ class _BucketState:
     start: Optional[float] = None
     vals: list[float] = field(default_factory=list)
     t0: Optional[float] = None
+
+
+def _poll_sleep_s(mode: str, period_s: float, elapsed_s: float) -> float:
+    """Return post-read sleep while preserving each mode's timing contract.
+
+    TUNE/TRACE poll_hz describes a start-to-start target period, so time already
+    spent in READ?/processing is subtracted. MEASURE deliberately keeps its
+    existing post-read interval semantics.
+    """
+    period_s = max(0.0, float(period_s))
+    if (mode or "").upper() == "MEASURE":
+        return period_s
+    elapsed_s = max(0.0, float(elapsed_s))
+    return max(0.0, period_s - elapsed_s)
 
 
 class ScpiSocket:
@@ -153,16 +187,14 @@ class Keithley6485:
     def initialize_basic(self) -> None:
         cmds = [
             "*RST",
-            ":SYST:ZCH ON",
-            ":SYST:ZCOR ON",
             ":FORM:ELEM READ",
             ":SENS:FUNC 'CURR'",
             ":SENS:CURR:RANG:AUTO ON",
             ":SENS:CURR:NPLC 0.1",
-            ":SYST:ZCH OFF",
         ]
         for c in cmds:
             self.try_send(c, pause_s=0.3)
+        self.zero_cycle()
 
     def apply_mode(self, settings: KeithleySettings) -> None:
         mode = (settings.mode or "TUNE").upper()
@@ -177,7 +209,8 @@ class Keithley6485:
             self.try_send(":SENS:CURR:RANG:AUTO ON")
         else:
             self.try_send(":SENS:CURR:RANG:AUTO OFF")
-            fixed_A = max(1e-15, float(s.range.fixed_range_nA) * 1e-9)
+            fixed_range_nA = _select_fixed_range_nA(s.range.fixed_range_nA)
+            fixed_A = fixed_range_nA * 1e-9
             self.try_send(f":SENS:CURR:RANG {fixed_A:.6e}")
 
         nplc = max(0.0001, float(s.nplc))
@@ -193,14 +226,20 @@ class Keithley6485:
         self.try_send(f":SENS:AVER:STAT {'ON' if af.enabled else 'OFF'}")
 
     def restart(self, settings: KeithleySettings) -> None:
-        self.try_send("*RST", pause_s=0.2)
         self.initialize_basic()
         self.apply_mode(settings)
 
     def zero_cycle(self) -> None:
-        self.try_send(":SYST:ZCH ON", pause_s=0.2)
-        self.try_send(":SYST:ZCOR ON", pause_s=0.2)
-        self.try_send(":SYST:ZCH OFF", pause_s=0.2)
+        cmds = [
+            ":SYST:ZCH ON",
+            ":SYST:ZCOR OFF",
+            "INIT",
+            ":SYST:ZCOR:ACQ",
+            ":SYST:ZCH OFF",
+            ":SYST:ZCOR ON",
+        ]
+        for c in cmds:
+            self.try_send(c, pause_s=0.2)
 
 
 class Keithley6485Worker(threading.Thread):
@@ -216,10 +255,12 @@ class Keithley6485Worker(threading.Thread):
 
         self._stats = _BucketState()
         self._trace = _BucketState()
+        self._trace_reset_request_id = 0
 
         self.model.update("keithley/connected", False, source="keithley", quality="bad")
         self.model.update("keithley/mode", (self.settings.mode or "TUNE").upper(), source="keithley")
         self._publish_trace_reset_state()
+        self.model.update("keithley/trace/reset_ack", 0, source="keithley")
 
     def _log(self, msg: str) -> None:
         self.model.update("keithley/log", msg, source="keithley")
@@ -246,8 +287,11 @@ class Keithley6485Worker(threading.Thread):
     def cmd_zero(self) -> None:
         self._cmdq.put(("zero", None))
 
-    def cmd_reset_trace(self) -> None:
-        self._cmdq.put(("trace_reset", None))
+    def cmd_reset_trace(self) -> int:
+        self._trace_reset_request_id += 1
+        request_id = self._trace_reset_request_id
+        self._cmdq.put(("trace_reset", request_id))
+        return request_id
 
     def _set_connected(self, ok: bool) -> None:
         self.connected = ok
@@ -276,6 +320,10 @@ class Keithley6485Worker(threading.Thread):
         self._reset_bucket(self._trace)
         self._publish_trace_reset_state()
 
+    def _perform_trace_reset(self, request_id: int) -> None:
+        self._reset_trace_accumulator()
+        self.model.update("keithley/trace/reset_ack", int(request_id), source="keithley")
+
     def _emit_bucket(self, prefix: str, state: _BucketState, interval_s: float) -> None:
         vals = state.vals
         n = len(vals)
@@ -302,7 +350,7 @@ class Keithley6485Worker(threading.Thread):
         if now - state.start >= interval_s:
             self._emit_bucket(prefix, state, interval_s)
             state.start = now
-            state.vals = [current_nA]
+            state.vals = []
 
     def _publish_single_sample(self, current_nA: float, t_s: float) -> None:
         for prefix in ("keithley/stats", "keithley/trace"):
@@ -344,6 +392,14 @@ class Keithley6485Worker(threading.Thread):
         self._set_connected(False)
         self._log("Disconnected.")
 
+    def _perform_zero_cycle(self) -> None:
+        if not self.connected or not self.dev:
+            return
+        self._log("Zero cycle ...")
+        self.dev.zero_cycle()
+        self._reset_all_accumulators()
+        self._log("Zero cycle done.")
+
     def run(self) -> None:
         while True:
             try:
@@ -371,12 +427,9 @@ class Keithley6485Worker(threading.Thread):
                             self._reset_all_accumulators()
                             self._log("Restart done.")
                     elif cmd == "zero":
-                        if self.connected and self.dev:
-                            self._log("Zero cycle ...")
-                            self.dev.zero_cycle()
-                            self._log("Zero cycle done.")
+                        self._perform_zero_cycle()
                     elif cmd == "trace_reset":
-                        self._reset_trace_accumulator()
+                        self._perform_trace_reset(int(payload))
             except queue.Empty:
                 pass
 
@@ -384,7 +437,8 @@ class Keithley6485Worker(threading.Thread):
                 time.sleep(0.05)
                 continue
 
-            mode, sleep_s, bucket_interval_s = self._current_poll_parameters()
+            mode, period_s, bucket_interval_s = self._current_poll_parameters()
+            cycle_started = time.perf_counter()
             try:
                 current_A = self.dev.read_current_A()
                 self.model.update("keithley/current_A", float(current_A), source="keithley")
@@ -401,7 +455,10 @@ class Keithley6485Worker(threading.Thread):
                     self._bucket_update("keithley/stats", self._stats, current_nA, bucket_interval_s)
                     self._bucket_update("keithley/trace", self._trace, current_nA, bucket_interval_s)
 
-                time.sleep(sleep_s)
+                elapsed_s = max(0.0, time.perf_counter() - cycle_started)
+                sleep_s = _poll_sleep_s(mode, period_s, elapsed_s)
+                if sleep_s > 0.0:
+                    time.sleep(sleep_s)
             except Exception as e:
                 self._log(f"I/O error: {e}")
                 self._do_disconnect()

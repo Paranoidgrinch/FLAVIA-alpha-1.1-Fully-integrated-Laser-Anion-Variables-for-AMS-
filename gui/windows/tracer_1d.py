@@ -15,11 +15,21 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from backend.channels import range_for, step_for, GROUPS, CHANNELS, unit_for
 from gui.panels.common import pretty_name
+from backend.qpt_coordinates import (
+    QPT_ASTIGMATISM_SET,
+    QPT_FOCUS_SET,
+    QPT_HARDWARE_SET_CHANNELS,
+    QPT_VIRTUAL_SET_CHANNELS,
+)
 
 
 def _pretty_label(ch: str) -> str:
     if ch == "magnet_current_set":
         return "Magnet current"
+    if ch == QPT_FOCUS_SET:
+        return "QPT Focus"
+    if ch == QPT_ASTIGMATISM_SET:
+        return "QPT Astigmatism"
     return pretty_name(ch)
 
 
@@ -31,7 +41,9 @@ def _traceable_set_channels() -> list[str]:
             c = CHANNELS.get(ch)
             if not c:
                 continue
-            if c.kind == "set" and c.topic_cmd:
+            if ch in QPT_HARDWARE_SET_CHANNELS:
+                continue
+            if c.kind == "set" and (c.topic_cmd or ch in QPT_VIRTUAL_SET_CHANNELS):
                 out.append(ch)
     if "magnet_current_set" in CHANNELS:
         out.append("magnet_current_set")
@@ -244,6 +256,13 @@ class Tracer1DDialog(QDialog):
             QMessageBox.warning(self, "Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
             return
 
+        from backend.trace_timing import build_trace_point_timing
+        timing = build_trace_point_timing(
+            dwell,
+            float(k_settings.trace.bucket_interval_s),
+            float(k_settings.trace.poll_hz),
+        )
+
         self._saved_keithley_settings = copy.deepcopy(k_settings)
         k_settings.mode = "TRACE"
         self.backend.apply_keithley_settings(k_settings)
@@ -251,14 +270,18 @@ class Tracer1DDialog(QDialog):
         self.original_value = float(self._get_current_set_value(self.param.channel))
         self.step_values = values
         self.dwell_time = dwell
+        self.settle_time = timing.settle_s
+        self.measure_time = timing.measure_s
+        self.measure_timeout_s = timing.timeout_s
+        self._tick_dt_s = 0.1
         self.current_step_index = -1
         self.step_elapsed = 0.0
         self.x_values.clear(); self.y_values.clear(); self.selected_index = None; self.applied_value = None
         self._update_plot()
         self.tracing_active = True
         self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True); self.apply_btn.setEnabled(False); self.export_btn.setEnabled(False)
-        self.status_label.setText(f"Tracing {self.param.channel} over {len(values)} steps (dwell {self.dwell_time:.1f}s).")
-        self.timer.start(1000)
+        self.status_label.setText(f"Tracing {self.param.channel} over {len(values)} steps (dwell {self.dwell_time:.1f}s = settle {self.settle_time:.1f}s + measure {self.measure_time:.1f}s).")
+        self.timer.start(int(self._tick_dt_s * 1000))
         self._next_step()
 
     def _next_step(self):
@@ -269,25 +292,74 @@ class Tracer1DDialog(QDialog):
         value = float(self.step_values[self.current_step_index])
         try:
             self._set_param_value(self.param.channel, value)
-            self.backend.reset_keithley_trace()
         except Exception as e:
             self.status_label.setText(f"Set failed: {e}")
         self.step_elapsed = 0.0
-        self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: set={value:.3f}, waiting...")
+        self.step_phase = "settle"
+        if self.settle_time <= 0.0:
+            try:
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status_label.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.step_phase = "reset_wait"
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+        else:
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: set={value:.3f}, settling...")
 
     def _on_timer_tick(self):
         if not self.tracing_active:
             return
-        self.step_elapsed += 1.0
-        remaining = max(0.0, self.dwell_time - self.step_elapsed)
-        self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting... ({remaining:.0f}s left)")
-        if self.step_elapsed < self.dwell_time:
+
+        self.step_elapsed += self._tick_dt_s
+
+        if self.step_phase == "settle":
+            remaining = max(0.0, self.settle_time - self.step_elapsed)
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: settling... ({remaining:.1f}s left)")
+            if self.step_elapsed < self.settle_time:
+                return
+            try:
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status_label.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.step_phase = "reset_wait"
+            self.step_elapsed = 0.0
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
             return
+
+        if self.step_phase == "reset_wait":
+            request_id = getattr(self, "_trace_reset_request_id", None)
+            if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
+                self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+                return
+            self.step_phase = "measure"
+            self.step_elapsed = 0.0
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring...")
+            return
+
+        if self.step_phase != "measure":
+            return
+
+        remaining = max(0.0, self.measure_time - self.step_elapsed)
+        if self.step_elapsed < self.measure_time:
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring... ({remaining:.1f}s left)")
+            return
+
         avg = self._get_trace_mean_nA()
+        if avg is None and self.step_elapsed < self.measure_timeout_s:
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for complete Keithley bucket...")
+            return
         if avg is None:
             avg = float("nan")
+
         setpoint = float(self.step_values[self.current_step_index])
-        self.x_values.append(setpoint); self.y_values.append(float(avg)); self._update_plot(); self._next_step()
+        self.x_values.append(setpoint)
+        self.y_values.append(float(avg))
+        self._update_plot()
+        self._next_step()
 
     def _best_index(self) -> Optional[int]:
         best_i = None; best_v = None
@@ -298,10 +370,19 @@ class Tracer1DDialog(QDialog):
                 best_v = v; best_i = i
         return best_i
 
+    def _restore_original_setpoint(self) -> None:
+        if self.applied_value is not None or self.original_value is None or self.param is None:
+            return
+        try:
+            self._set_param_value(self.param.channel, float(self.original_value))
+        except Exception:
+            pass
+
     def _finish_trace(self):
         self.tracing_active = False
         self.timer.stop()
         self._restore_keithley_settings()
+        self._restore_original_setpoint()
         self.stop_btn.setEnabled(False); self.start_btn.setEnabled(True); self.export_btn.setEnabled(bool(self.x_values))
         best_i = self._best_index()
         if best_i is not None:
@@ -316,6 +397,7 @@ class Tracer1DDialog(QDialog):
         self.tracing_active = False
         self.timer.stop()
         self._restore_keithley_settings()
+        self._restore_original_setpoint()
         self.stop_btn.setEnabled(False); self.start_btn.setEnabled(True); self.export_btn.setEnabled(bool(self.x_values))
         best_i = self._best_index()
         if best_i is not None:
@@ -410,10 +492,6 @@ class Tracer1DDialog(QDialog):
             self.tracing_active = False
             self.timer.stop()
         self._restore_keithley_settings()
-        if self.applied_value is None and self.original_value is not None and self.param is not None:
-            try:
-                self._set_param_value(self.param.channel, float(self.original_value))
-            except Exception:
-                pass
+        self._restore_original_setpoint()
         self._reset_ui_after_run()
         super().closeEvent(event)

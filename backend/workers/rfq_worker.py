@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import socket
+import threading
 import time
 
 import numpy as np
@@ -356,7 +357,7 @@ class RFQWorker(QtCore.QObject):
         self.fg = DS345Client()
         self.scope = ScopeClient()
         self.lc = LCSSHClient()
-        self._sweep_cancelled = False
+        self._sweep_cancel_event = threading.Event()
 
     @QtCore.pyqtSlot()
     def request_fg_status(self):
@@ -453,10 +454,10 @@ class RFQWorker(QtCore.QObject):
 
         L_max_uH = 512.0
         L_step_hw = 0.25
-        self._sweep_cancelled = False
+        self._sweep_cancel_event.clear()
 
         for idx, val in enumerate(values):
-            if self._sweep_cancelled:
+            if self._sweep_cancel_event.is_set():
                 self.sweepLog.emit("Sweep cancelled by user.")
                 break
             if val < 0.0 or val >= L_max_uH:
@@ -474,7 +475,9 @@ class RFQWorker(QtCore.QObject):
                 continue
 
             self.sweepProgress.emit(idx + 1, len(values), L_uH)
-            time.sleep(dwell_s)
+            if self._sweep_cancel_event.wait(dwell_s):
+                self.sweepLog.emit("Sweep cancelled by user.")
+                break
 
             if measure_scope:
                 try:
@@ -500,7 +503,7 @@ class RFQWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def cancel_sweep(self):
-        self._sweep_cancelled = True
+        self._sweep_cancel_event.set()
 
     @QtCore.pyqtSlot()
     def shutdown(self):

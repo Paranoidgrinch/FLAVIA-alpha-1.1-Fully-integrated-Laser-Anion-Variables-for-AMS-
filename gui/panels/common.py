@@ -4,10 +4,11 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QWidget, QLabel, QToolButton, QHBoxLayout, QVBoxLayout, QGroupBox
+from PyQt5.QtWidgets import QWidget, QLabel, QToolButton, QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox
 
 from backend.channels import decimals_for, unit_for, range_for, step_for
 from gui.widgets import StepSliderControl
+from backend.voltage_calibration import calibrated_voltage
 
 
 def pretty_name(channel: str) -> str:
@@ -90,15 +91,44 @@ class AnalogBinding:
 class AnalogControl(QWidget):
     """
     Compact row:
-      [Label] [SET value+unit (bold)] [slider incl. step-selection] [Meas: value+unit (bold)]
+      [Label] [slider incl. step-selection] [Meas: value+unit] [optional Calib: value+unit]
+
+    ``show_calibration`` uses the setpoint calibration curve for ``binding.set_ch``.
+    ``aux_label`` is an optional second line in the label area (used for entry energy).
     """
-    def __init__(self, backend, binding: AnalogBinding, label: Optional[str] = None, parent=None):
+    def __init__(
+        self,
+        backend,
+        binding: AnalogBinding,
+        label: Optional[str] = None,
+        parent=None,
+        *,
+        show_calibration: bool = False,
+        aux_label: Optional[str] = None,
+    ):
         super().__init__(parent)
         self.backend = backend
         self.binding = binding
 
         self.lbl = QLabel(label or pretty_name(binding.set_ch))
         self.lbl.setMinimumWidth(170)
+
+        self.aux_lbl = None
+        if aux_label is not None:
+            label_wrap = QWidget()
+            label_lay = QVBoxLayout(label_wrap)
+            label_lay.setContentsMargins(0, 0, 0, 0)
+            label_lay.setSpacing(1)
+            label_lay.addWidget(self.lbl)
+
+            self.aux_lbl = QLabel(aux_label)
+            self.aux_lbl.setStyleSheet("font-weight:800; font-size:10px; color:#b00020;")
+            label_lay.addWidget(self.aux_lbl)
+            self._label_widget = label_wrap
+        else:
+            self._label_widget = self.lbl
+
+        self.show_calibration = bool(show_calibration)
 
         d_set = decimals_for(binding.set_ch, default=1)
         mult = 10 ** int(max(0, d_set))
@@ -116,28 +146,81 @@ class AnalogControl(QWidget):
             decimals=d_set,
         )
 
+        # Keep the optional second label line inside the normal control-row height.
+        # This prevents the Ion Cooler row from pushing the rows below it down.
+        if self.aux_lbl is not None:
+            self._label_widget.setFixedHeight(self.slider.sizeHint().height())
+
         self.meas_prefix = QLabel("Meas:")
         self.meas_prefix.setStyleSheet("font-weight:800;")
         self.meas_val = QLabel("—")
         self.meas_val.setStyleSheet("font-weight:800;")
         self.meas_val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.meas_val.setMinimumWidth(140)
+
+        self.calib_prefix = None
+        self.calib_val = None
+        if self.show_calibration:
+            self.calib_prefix = QLabel("Calib:")
+            self.calib_prefix.setStyleSheet("font-weight:800; font-size:10px; color:#003b7a;")
+            self.calib_val = QLabel("—")
+            self.calib_val.setStyleSheet("font-weight:800; font-size:10px; color:#003b7a;")
+            self.calib_val.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        # Preserve the original horizontal footprint of the old
+        # ``Meas:`` + value pair.  Calib is stacked underneath inside this
+        # same fixed-width/fixed-height widget, so the slider keeps its
+        # original width and the row does not become taller.
+        readback_width = self.meas_prefix.sizeHint().width() + 8 + 140
+        self._readback_widget = QWidget()
+        self._readback_widget.setFixedWidth(readback_width)
+        self._readback_widget.setFixedHeight(self.slider.sizeHint().height())
+
+        readback_lay = QGridLayout(self._readback_widget)
+        readback_lay.setContentsMargins(0, 0, 0, 0)
+        readback_lay.setHorizontalSpacing(8)
+        readback_lay.setVerticalSpacing(0)
+        readback_lay.addWidget(self.meas_prefix, 0, 0)
+        readback_lay.addWidget(self.meas_val, 0, 1)
+        if self.show_calibration:
+            readback_lay.addWidget(self.calib_prefix, 1, 0)
+            readback_lay.addWidget(self.calib_val, 1, 1)
+        readback_lay.setColumnStretch(1, 1)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(8)
-        lay.addWidget(self.lbl, 0)
+        lay.addWidget(self._label_widget, 0)
         lay.addWidget(self.slider, 1)
-        lay.addWidget(self.meas_prefix, 0)
-        lay.addWidget(self.meas_val, 0)
+        lay.addWidget(self._readback_widget, 0)
 
         self.slider.valueChangedFloat.connect(self._on_user_send)
 
+        if self.show_calibration:
+            current = self.backend.model.get(self.binding.set_ch)
+            if current is not None and current.value is not None:
+                self._update_calibration(current.value)
+
     def _on_user_send(self, value: float) -> None:
+        self._update_calibration(value)
         try:
             self.backend.set_channel(self.binding.set_ch, float(value))
         except Exception:
             pass
+
+    def set_aux_text(self, text: str) -> None:
+        if self.aux_lbl is not None:
+            self.aux_lbl.setText(str(text))
+
+    def _update_calibration(self, set_value) -> None:
+        if not self.show_calibration or self.calib_val is None:
+            return
+        try:
+            value = calibrated_voltage(self.binding.set_ch, float(set_value))
+            d = decimals_for(self.binding.set_ch, default=2)
+            u = unit_for(self.binding.set_ch)
+            self.calib_val.setText(f"{value:.{d}f} {u}".strip())
+        except Exception:
+            self.calib_val.setText("—")
 
     def update_channel(self, name: str, value) -> None:
         if name == self.binding.set_ch:
@@ -145,6 +228,7 @@ class AnalogControl(QWidget):
                 self.slider.set_real_value(float(value), emit=False)
             except Exception:
                 pass
+            self._update_calibration(value)
         elif self.binding.meas_ch and name == self.binding.meas_ch:
             self.meas_val.setText(self._format_value(self.binding.meas_ch, value))
 

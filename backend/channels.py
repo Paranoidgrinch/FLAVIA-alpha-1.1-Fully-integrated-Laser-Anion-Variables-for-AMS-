@@ -130,6 +130,12 @@ def _add(
 # --- Core state channels ---
 _add("mqtt_connected", kind="state")
 
+# --- Virtual QPT controls (translated to the three hardware PSUs in Backend) ---
+_add("qpt/focus/set_pct", unit="%", kind="set", decimals=1, min_val=0.0, max_val=100.0, default_step=1.0)
+_add("qpt/focus/meas_pct", unit="%", kind="derived", decimals=1)
+_add("qpt/astigmatism/set_pct", unit="%", kind="set", decimals=1, min_val=0.0, max_val=100.0, default_step=1.0)
+_add("qpt/astigmatism/meas_pct", unit="%", kind="derived", decimals=1)
+
 # --- Cup switch worker (HTTP device, not MQTT topics) ---
 _add("cup/connected", kind="state")
 _add("cup/selected", kind="meas", decimals=0)
@@ -319,9 +325,14 @@ GROUPS: Dict[str, List[str]] = {
         "cs/extraction/set_u_v",
         "cs/einzellens/set_u_v",
         "cs/lens2/set_u_v",
+        # raw QPT hardware channels are kept for config compatibility
         "cs/qp1/set_u_v",
         "cs/qp2/set_u_v",
         "cs/qp3/set_u_v",
+
+        # virtual QPT coordinates used by GUI/tracers
+        "qpt/focus/set_pct",
+        "qpt/astigmatism/set_pct",
         "cs/esa/set_u_v",
         "cs/lens4/set_u_v",
 

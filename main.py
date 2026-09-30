@@ -14,6 +14,7 @@ def main() -> int:
 
     backend = Backend()  # defaults in backend/channels.py
     backend.start()
+    app.aboutToQuit.connect(backend.stop)
 
     win = MainWindow(backend)
     win.show()

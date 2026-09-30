@@ -15,11 +15,21 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from backend.channels import range_for, step_for, GROUPS, CHANNELS, unit_for
 from gui.panels.common import pretty_name
+from backend.qpt_coordinates import (
+    QPT_ASTIGMATISM_SET,
+    QPT_FOCUS_SET,
+    QPT_HARDWARE_SET_CHANNELS,
+    QPT_VIRTUAL_SET_CHANNELS,
+)
 
 
 def _pretty_label(ch: str) -> str:
     if ch == "magnet_current_set":
         return "Magnet current"
+    if ch == QPT_FOCUS_SET:
+        return "QPT Focus"
+    if ch == QPT_ASTIGMATISM_SET:
+        return "QPT Astigmatism"
     return pretty_name(ch)
 
 
@@ -31,7 +41,9 @@ def _traceable_set_channels() -> List[str]:
             c = CHANNELS.get(ch)
             if not c:
                 continue
-            if c.kind == "set" and c.topic_cmd:
+            if ch in QPT_HARDWARE_SET_CHANNELS:
+                continue
+            if c.kind == "set" and (c.topic_cmd or ch in QPT_VIRTUAL_SET_CHANNELS):
                 out.append(ch)
     if "magnet_current_set" in CHANNELS:
         out.append("magnet_current_set")
@@ -264,6 +276,14 @@ class Tracer2DDialog(QDialog):
         if dwell_s < float(k_settings.trace.bucket_interval_s):
             QMessageBox.warning(self, "2D Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
             return
+
+        from backend.trace_timing import build_trace_point_timing
+        timing = build_trace_point_timing(
+            dwell_s,
+            float(k_settings.trace.bucket_interval_s),
+            float(k_settings.trace.poll_hz),
+        )
+
         self._saved_keithley_settings = copy.deepcopy(k_settings)
         k_settings.mode = "TRACE"
         self.backend.apply_keithley_settings(k_settings)
@@ -272,8 +292,14 @@ class Tracer2DDialog(QDialog):
         self.orig1 = self._get_set_value(self.param1.channel); self.orig2 = self._get_set_value(self.param2.channel)
         self.applied = None
         self.grid = [[float("nan") for _ in self.v1] for __ in self.v2]
-        self.i = -1; self.j = -1; self.sel_i = None; self.sel_j = None
-        self.dwell_s = dwell_s; self.elapsed_s = 0.0; self.running = True
+        self.i = -1; self.j = 0; self.sel_i = None; self.sel_j = None
+        self.dwell_s = dwell_s
+        self.settle_s = timing.settle_s
+        self.measure_s = timing.measure_s
+        self.measure_timeout_s = timing.timeout_s
+        self._tick_dt_s = 0.1
+        self.elapsed_s = 0.0
+        self.running = True
         self.btn_start.setEnabled(False); self.btn_stop.setEnabled(True); self.btn_apply.setEnabled(False); self.btn_export.setEnabled(False)
         self._update_axes_labels(); self._draw_heatmap()
         self.timer.start(int(self._tick_dt_s * 1000))
@@ -288,29 +314,86 @@ class Tracer2DDialog(QDialog):
         try:
             self._set_param_value(self.param2.channel, float(self.v2[self.j]))
             self._set_param_value(self.param1.channel, float(self.v1[self.i]))
-            self.backend.reset_keithley_trace()
         except Exception:
             pass
         self.elapsed_s = 0.0
-        self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting...")
+        self.point_phase = "settle"
+        if self.settle_s <= 0.0:
+            try:
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.point_phase = "reset_wait"
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+        else:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling...")
 
     def _tick(self):
         if not self.running:
             return
+
         self.elapsed_s += self._tick_dt_s
-        rem = max(0.0, self.dwell_s - self.elapsed_s)
-        self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting... ({rem:.1f}s)")
-        if self.elapsed_s < self.dwell_s:
+
+        if self.point_phase == "settle":
+            rem = max(0.0, self.settle_s - self.elapsed_s)
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling... ({rem:.1f}s)")
+            if self.elapsed_s < self.settle_s:
+                return
+            try:
+                self._trace_reset_request_id = self.backend.reset_keithley_trace()
+            except Exception as e:
+                self.status.setText(f"Keithley trace reset failed: {e}")
+                self._trace_reset_request_id = None
+                return
+            self.point_phase = "reset_wait"
+            self.elapsed_s = 0.0
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
             return
+
+        if self.point_phase == "reset_wait":
+            request_id = getattr(self, "_trace_reset_request_id", None)
+            if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
+                self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+                return
+            self.point_phase = "measure"
+            self.elapsed_s = 0.0
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
+            return
+
+        if self.point_phase != "measure":
+            return
+
+        rem = max(0.0, self.measure_s - self.elapsed_s)
+        if self.elapsed_s < self.measure_s:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring... ({rem:.1f}s)")
+            return
+
         y = self._get_trace_mean()
+        if y is None and self.elapsed_s < self.measure_timeout_s:
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for complete Keithley bucket...")
+            return
         if y is None:
             y = float("nan")
+
         self.grid[self.j][self.i] = float(y)
         self._draw_heatmap()
         self._next_point()
 
+    def _restore_original_setpoints(self) -> None:
+        if self.applied is not None:
+            return
+        for param, value in ((self.param1, self.orig1), (self.param2, self.orig2)):
+            if param is None or value is None:
+                continue
+            try:
+                self._set_param_value(param.channel, float(value))
+            except Exception:
+                pass
+
     def _finish(self):
-        self.running = False; self.timer.stop(); self._restore_keithley_settings()
+        self.running = False; self.timer.stop(); self._restore_keithley_settings(); self._restore_original_setpoints()
         self.btn_stop.setEnabled(False); self.btn_start.setEnabled(True); self.btn_export.setEnabled(self._has_any_data())
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
@@ -322,7 +405,7 @@ class Tracer2DDialog(QDialog):
     def stop_trace(self):
         if not self.running:
             return
-        self.running = False; self.timer.stop(); self._restore_keithley_settings()
+        self.running = False; self.timer.stop(); self._restore_keithley_settings(); self._restore_original_setpoints()
         self.btn_stop.setEnabled(False); self.btn_start.setEnabled(True); self.btn_export.setEnabled(self._has_any_data())
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
@@ -423,11 +506,6 @@ class Tracer2DDialog(QDialog):
         if self.running:
             self.running = False; self.timer.stop()
         self._restore_keithley_settings()
-        if self.applied is None and self.param1 is not None and self.param2 is not None and self.orig1 is not None and self.orig2 is not None:
-            try:
-                self._set_param_value(self.param1.channel, float(self.orig1))
-                self._set_param_value(self.param2.channel, float(self.orig2))
-            except Exception:
-                pass
+        self._restore_original_setpoints()
         self._reset_ui_after_run()
         super().closeEvent(event)

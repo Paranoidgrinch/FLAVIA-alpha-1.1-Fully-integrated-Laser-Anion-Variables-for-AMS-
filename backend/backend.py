@@ -8,6 +8,17 @@ from copy import deepcopy
 
 from .channels import MQTT_DEFAULT_HOST, MQTT_DEFAULT_PORT, CHANNELS, decimals_for, unit_for
 from .model import DataModel
+from .qpt_coordinates import (
+    QPT_ASTIGMATISM_MEAS,
+    QPT_ASTIGMATISM_SET,
+    QPT_FOCUS_MEAS,
+    QPT_FOCUS_SET,
+    QPT_HARDWARE_MEAS_CHANNELS,
+    QPT_HARDWARE_SET_CHANNELS,
+    QPT_VIRTUAL_SET_CHANNELS,
+    focus_astigmatism_to_qpt,
+    qpt_to_focus_astigmatism,
+)
 
 from .workers.mqtt_signals_worker import MqttSignalsWorker
 from .workers.cup_switch_worker import CupSwitchWorker, CupSwitchConfig
@@ -37,6 +48,17 @@ class Backend:
         keithley_settings: Optional[KeithleySettings] = None,
     ):
         self.model = DataModel(unit_resolver=unit_for)
+
+        # Virtual QPT coordinates. Hardware readbacks/setpoints refresh these
+        # as soon as a complete, fresh QP1/QP2/QP3 triplet is available.
+        self.model.update(QPT_FOCUS_SET, 0.0, source="qpt_virtual")
+        self.model.update(QPT_ASTIGMATISM_SET, 50.0, source="qpt_virtual")
+        self.model.update(QPT_FOCUS_MEAS, 0.0, source="qpt_virtual")
+        self.model.update(QPT_ASTIGMATISM_MEAS, 50.0, source="qpt_virtual")
+        for name in QPT_HARDWARE_SET_CHANNELS:
+            self.model.subscribe(name, self._on_qpt_setpoint_update)
+        for name in QPT_HARDWARE_MEAS_CHANNELS:
+            self.model.subscribe(name, self._on_qpt_measurement_update)
 
         #ramp für config laden
         self._ramp_cancel = threading.Event()
@@ -114,6 +136,11 @@ class Backend:
         # logging thread starts lazily on first start_logging()
 
     def apply_default_steerer_values_if_empty(self) -> None:
+        # The delayed startup task may wake after Backend.stop(). Never publish
+        # default hardware setpoints once the backend is no longer running.
+        if not self._started:
+            return
+
         for key in self._default_steerer_channels:
             ch = self.model.get(key)
             if ch is None:
@@ -129,6 +156,7 @@ class Backend:
         if not self._started:
             return
         self._started = False
+        self._cancel_active_ramp()
 
         try:
             self.sample_exposure.stop()
@@ -136,19 +164,27 @@ class Backend:
             pass
 
         try:
-            self.stepper.stop()
+            self.stepper.shutdown()
         except Exception:
             pass
 
         try:
-            self.magnet.stop()
+            self.magnet.shutdown()
         except Exception:
             pass
 
         try:
-            self.gaussmeter.stop()
+            self.gaussmeter.shutdown()
         except Exception:
             pass
+
+        # All three workers use shutdown() rather than stop(). Signal all first,
+        # then wait briefly so their sockets can close before the process exits.
+        for w in (self.stepper, self.magnet, self.gaussmeter):
+            try:
+                w.join(timeout=3.0)
+            except Exception:
+                pass
 
         try:
             self.logging.shutdown()
@@ -200,11 +236,85 @@ class Backend:
 
 
     def reset_keithley_trace(self):
-        self.keithley.cmd_reset_trace()
+        return self.keithley.cmd_reset_trace()
+
+    def keithley_trace_reset_acknowledged(self, request_id) -> bool:
+        ch = self.model.get("keithley/trace/reset_ack")
+        try:
+            ack = int(ch.value) if ch is not None and ch.value is not None else 0
+            return ack >= int(request_id)
+        except (TypeError, ValueError):
+            return False
+    # ----------------------
+    # Virtual QPT coordinates
+    # ----------------------
+    def _fresh_qpt_triplet(self, names, max_skew_s: float = 0.5):
+        channels = [self.model.get(name) for name in names]
+        if any(ch is None or ch.value is None for ch in channels):
+            return None
+        timestamps = [float(ch.timestamp) for ch in channels]
+        if max(timestamps) - min(timestamps) > float(max_skew_s):
+            return None
+        try:
+            return tuple(float(ch.value) for ch in channels)
+        except Exception:
+            return None
+
+    def _update_virtual_qpt_from_hardware(self, names, focus_channel: str, astigmatism_channel: str) -> None:
+        values = self._fresh_qpt_triplet(names)
+        if values is None:
+            return
+        focus, astigmatism = qpt_to_focus_astigmatism(*values)
+        self.model.update(focus_channel, focus, source="qpt_derived")
+        self.model.update(astigmatism_channel, astigmatism, source="qpt_derived")
+
+    def _on_qpt_setpoint_update(self, _channel) -> None:
+        self._update_virtual_qpt_from_hardware(
+            QPT_HARDWARE_SET_CHANNELS,
+            QPT_FOCUS_SET,
+            QPT_ASTIGMATISM_SET,
+        )
+
+    def _on_qpt_measurement_update(self, _channel) -> None:
+        self._update_virtual_qpt_from_hardware(
+            QPT_HARDWARE_MEAS_CHANNELS,
+            QPT_FOCUS_MEAS,
+            QPT_ASTIGMATISM_MEAS,
+        )
+
+    def _virtual_qpt_value(self, channel_name: str, default: float) -> float:
+        ch = self.model.get(channel_name)
+        try:
+            return float(ch.value) if ch is not None and ch.value is not None else float(default)
+        except Exception:
+            return float(default)
+
+    def set_qpt_focus_astigmatism(self, focus_pct: float, astigmatism_pct: float) -> None:
+        qp1, qp2, qp3 = focus_astigmatism_to_qpt(focus_pct, astigmatism_pct)
+
+        # Keep virtual set values immediately in sync for GUI/tracers.
+        self.model.update(QPT_FOCUS_SET, float(focus_pct), source="qpt_virtual")
+        self.model.update(QPT_ASTIGMATISM_SET, float(astigmatism_pct), source="qpt_virtual")
+
+        for channel_name, voltage in zip(QPT_HARDWARE_SET_CHANNELS, (qp1, qp2, qp3)):
+            c = CHANNELS[channel_name]
+            d = decimals_for(channel_name, default=6)
+            self.mqtt_publish_value(c.topic_cmd, voltage, decimals=d)
+
     # ----------------------
     # Channel-based set API
     # ----------------------
     def set_channel(self, channel_name: str, value: Any) -> None:
+        if channel_name in QPT_VIRTUAL_SET_CHANNELS:
+            focus = self._virtual_qpt_value(QPT_FOCUS_SET, 0.0)
+            astigmatism = self._virtual_qpt_value(QPT_ASTIGMATISM_SET, 50.0)
+            if channel_name == QPT_FOCUS_SET:
+                focus = float(value)
+            else:
+                astigmatism = float(value)
+            self.set_qpt_focus_astigmatism(focus, astigmatism)
+            return
+
         c = CHANNELS.get(channel_name)
         if c is None or not c.topic_cmd:
             raise KeyError(f"Channel {channel_name!r} has no topic_cmd mapping.")
@@ -251,7 +361,8 @@ class Backend:
             return
 
         self._cancel_active_ramp()
-        self._ramp_cancel = threading.Event()
+        cancel_event = threading.Event()
+        self._ramp_cancel = cancel_event
 
         starts = {k: self._channel_numeric_value(k, fallback=float(v)) for k, v in targets.items()}
 
@@ -260,7 +371,7 @@ class Backend:
 
         def ramp_thread():
             for i in range(steps + 1):
-                if self._ramp_cancel.is_set():
+                if cancel_event.is_set():
                     return
 
                 frac = i / steps
@@ -357,12 +468,9 @@ class Backend:
             return
 
         # cancel previous ramp
-        try:
-            self._ramp_cancel.set()
-        except Exception:
-            pass
-
-        self._ramp_cancel = threading.Event()
+        self._cancel_active_ramp()
+        cancel_event = threading.Event()
+        self._ramp_cancel = cancel_event
 
         # snapshot start values
         def current_value(key: str) -> float:
@@ -411,7 +519,7 @@ class Backend:
 
         def ramp_thread():
             for i in range(steps + 1):
-                if self._ramp_cancel.is_set():
+                if cancel_event.is_set():
                     return
                 frac = i / steps
 
