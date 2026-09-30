@@ -103,7 +103,7 @@ class RFQService(QtCore.QObject):
     def stop(self) -> None:
         # safe to call multiple times
         try:
-            self._cancelSweep.emit()
+            self.worker.cancel_sweep()
         except Exception:
             pass
 
@@ -150,4 +150,4 @@ class RFQService(QtCore.QObject):
         self._runSweepL.emit(float(center_L), float(span), float(step), float(dwell_ms), bool(measure_scope))
 
     def cancel_sweep(self) -> None:
-        self._cancelSweep.emit()
+        self.worker.cancel_sweep()
