@@ -34,6 +34,8 @@ from .panels.ion_optics import (
 )
 from .panels.ion_cooler import IonCoolerPanel
 from .panels.keithley_panel import KeithleyPanel
+from .panels.legacy_current import LegacyCurrentMeasurementsPanel
+from .panels.legacy_beamline import LegacyBeamlineControlsPanel
 from .panels.sample_selection import SampleSelectionPanel
 from .panels.magnet_panel import MagnetPanel
 from gui.dialogs.config_apply_dialog import ConfigApplyDialog
@@ -104,6 +106,10 @@ class MainWindow(QMainWindow):
         self.lbl_mqtt.setFont(f)
         top.addWidget(self.lbl_mqtt)
 
+        self.lbl_legacy = QLabel("Legacy TCP: —")
+        self.lbl_legacy.setFont(f)
+        top.addWidget(self.lbl_legacy)
+
         self.lbl_log = QLabel("LOG: OFF")
         self.lbl_log.setFont(f)
         self.lbl_log.setStyleSheet("color:#a00;")
@@ -122,12 +128,14 @@ class MainWindow(QMainWindow):
         self.panel_ion_source = IonSourcePanel(self.backend, self.adapter)
         self.panel_digital = DigitalControlsPanel(self.backend, self.adapter)
         self.panel_keithley = KeithleyPanel(self.backend, self.adapter)
+        self.panel_legacy_current = LegacyCurrentMeasurementsPanel(self.backend, self.adapter)
         self.panel_sample = SampleSelectionPanel(self.backend, self.adapter)
         self.panel_magnet = MagnetPanel(self.backend, self.adapter)
 
         left_lay.addWidget(self.panel_ion_source)
         left_lay.addWidget(self.panel_digital)
         left_lay.addWidget(self.panel_keithley)
+        left_lay.addWidget(self.panel_legacy_current)
         left_lay.addWidget(self.panel_sample)
         left_lay.addWidget(self.panel_magnet)
         left_lay.addStretch(1)
@@ -145,11 +153,13 @@ class MainWindow(QMainWindow):
         self.panel_ion_cooler = IonCoolerPanel(self.backend, self.adapter)
         self.panel_ion_optics_post = PostCoolerIonOpticsPanel(self.backend, self.adapter)
         self.panel_ion_optics_esa = ESAIonOpticsPanel(self.backend, self.adapter)
+        self.panel_legacy_beamline = LegacyBeamlineControlsPanel(self.backend, self.adapter)
 
         right_lay.addWidget(self.panel_ion_optics_pre)
         right_lay.addWidget(self.panel_ion_cooler)
         right_lay.addWidget(self.panel_ion_optics_post)
         right_lay.addWidget(self.panel_ion_optics_esa)
+        right_lay.addWidget(self.panel_legacy_beamline)
         right_lay.addStretch(1)
 
         right_scroll = QScrollArea()
@@ -175,6 +185,7 @@ class MainWindow(QMainWindow):
 
         self.adapter.channelUpdated.connect(self.on_channel_updated)
         self.adapter.register_channel("mqtt_connected")
+        self.adapter.register_channel("legacy/connected")
 
     def open_rfq_mathieu(self) -> None:
         if self.rfq_win is None:
@@ -275,6 +286,12 @@ class MainWindow(QMainWindow):
             ok = bool(value)
             self.lbl_mqtt.setText("MQTT: Connected" if ok else "MQTT: Disconnected")
             self.lbl_mqtt.setStyleSheet("color:#0a0;" if ok else "color:#a00;")
+            return
+
+        if name == "legacy/connected":
+            ok = bool(value)
+            self.lbl_legacy.setText("Legacy TCP: Connected" if ok else "Legacy TCP: Disconnected")
+            self.lbl_legacy.setStyleSheet("color:#0a0;" if ok else "color:#a00;")
             return
 
     def toggle_logging(self) -> None:

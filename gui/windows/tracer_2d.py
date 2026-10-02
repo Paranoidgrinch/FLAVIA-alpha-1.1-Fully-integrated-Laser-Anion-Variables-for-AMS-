@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, List, Tuple
@@ -15,6 +16,11 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from backend.channels import range_for, step_for, GROUPS, CHANNELS, unit_for
 from gui.panels.common import pretty_name
+from gui.legacy_safety import ACC_TERMINAL_CHANNEL, confirm_terminal_voltage_change
+from backend.trace_sources import (
+    TRACE_MEASUREMENT_ORDER, TRACE_MEASUREMENT_SOURCES, source_for,
+    read_measurement_nA, read_range_label,
+)
 from backend.qpt_coordinates import (
     QPT_ASTIGMATISM_SET,
     QPT_FOCUS_SET,
@@ -30,11 +36,14 @@ def _pretty_label(ch: str) -> str:
         return "QPT Focus"
     if ch == QPT_ASTIGMATISM_SET:
         return "QPT Astigmatism"
+    c = CHANNELS.get(ch)
+    if c is not None and c.display_name:
+        return c.display_name
     return pretty_name(ch)
 
 
 def _traceable_set_channels() -> List[str]:
-    allowed_groups = ["Ion Source", "Ion Optics", "Ion Cooler"]
+    allowed_groups = ["Ion Source", "Ion Optics", "Ion Cooler", "BI Controls", "ACC Controls", "HES Controls", "HEM Controls", "HEE Controls", "DSW Controls"]
     out: List[str] = []
     for g in allowed_groups:
         for ch in GROUPS.get(g, []):
@@ -43,7 +52,7 @@ def _traceable_set_channels() -> List[str]:
                 continue
             if ch in QPT_HARDWARE_SET_CHANNELS:
                 continue
-            if c.kind == "set" and (c.topic_cmd or ch in QPT_VIRTUAL_SET_CHANNELS):
+            if c.kind == "set" and (c.topic_cmd or c.transport == "legacy" or ch in QPT_VIRTUAL_SET_CHANNELS):
                 out.append(ch)
     if "magnet_current_set" in CHANNELS:
         out.append("magnet_current_set")
@@ -77,6 +86,9 @@ class Tracer2DDialog(QDialog):
         self.v1: List[float] = []
         self.v2: List[float] = []
         self.grid: List[List[float]] = []
+        self.range_grid: List[List[str]] = []
+        self.measurement_source_key = "keithley"
+        self._measurement_started_at = 0.0
         self.i = -1
         self.j = -1
         self.dwell_s = 2.0
@@ -90,8 +102,15 @@ class Tracer2DDialog(QDialog):
         self._build_ui()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
-        self.adapter.register_channel("keithley/trace/mean_nA")
-        self.adapter.register_channel("keithley/trace/n")
+        for source_key in TRACE_MEASUREMENT_ORDER:
+            source = source_for(source_key)
+            self.adapter.register_channel(source.value_channel)
+            if source.count_channel:
+                self.adapter.register_channel(source.count_channel)
+            if source.range_channel:
+                self.adapter.register_channel(source.range_channel)
+            if source.overload_channel:
+                self.adapter.register_channel(source.overload_channel)
         if self.param1_combo.count() > 0:
             self.param1_combo.setCurrentIndex(0)
             self.param2_combo.setCurrentIndex(min(1, self.param2_combo.count() - 1))
@@ -111,6 +130,15 @@ class Tracer2DDialog(QDialog):
             self.param2_combo.addItem(_pretty_label(ch), userData=ch)
         self.param1_combo.currentIndexChanged.connect(self._update_params)
         self.param2_combo.currentIndexChanged.connect(self._update_params)
+
+        row += 1
+        form.addWidget(QLabel("Measurement source:"), row, 0)
+        self.measurement_combo = QComboBox()
+        for source_key in TRACE_MEASUREMENT_ORDER:
+            source = TRACE_MEASUREMENT_SOURCES[source_key]
+            self.measurement_combo.addItem(source.label, userData=source_key)
+        self.measurement_combo.currentIndexChanged.connect(self._measurement_source_changed)
+        form.addWidget(self.measurement_combo, row, 1, 1, 3)
 
         row += 1
         form.addWidget(QLabel("P1 start/end/step:"), row, 0)
@@ -159,10 +187,43 @@ class Tracer2DDialog(QDialog):
         layout.addLayout(rowb)
 
     def _set_param_value(self, ch: str, value: float) -> None:
+        if ch == ACC_TERMINAL_CHANNEL:
+            if not confirm_terminal_voltage_change(self, self.backend, float(value)):
+                raise RuntimeError("ACC terminal-voltage change cancelled by operator.")
         if ch == "magnet_current_set":
             self.backend.set_magnet_current(float(value))
         else:
             self.backend.set_channel(ch, float(value))
+
+    def _measurement_source_changed(self, *_args) -> None:
+        self.measurement_source_key = str(self.measurement_combo.currentData() or "keithley")
+        if self.cbar is not None:
+            self.cbar.set_label(f"{Tracer2DDialog._measurement_label(self)} current [nA]")
+        self.canvas.draw_idle()
+
+    def _uses_keithley_trace(self) -> bool:
+        return source_for(getattr(self, "measurement_source_key", "keithley")).uses_keithley_trace
+
+    def _measurement_label(self) -> str:
+        return source_for(getattr(self, "measurement_source_key", "keithley")).label
+
+    def _get_selected_measurement(self) -> Optional[float]:
+        key = getattr(self, "measurement_source_key", "keithley")
+        if source_for(key).uses_keithley_trace:
+            return Tracer2DDialog._get_trace_mean(self)
+        return read_measurement_nA(
+            self.backend.model, key,
+            min_timestamp=getattr(self, "_measurement_started_at", None),
+            max_age_s=2.5,
+        )
+
+    def _begin_measurement_phase(self) -> None:
+        self.point_phase = "measure"
+        self.elapsed_s = 0.0
+        self._measurement_started_at = time.time()
+        self.status.setText(
+            f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring {Tracer2DDialog._measurement_label(self)}..."
+        )
 
     def _get_set_value(self, ch: str) -> float:
         c = self.backend.model.get(ch)
@@ -271,27 +332,34 @@ class Tracer2DDialog(QDialog):
         if not v1 or not v2:
             QMessageBox.warning(self, "2D Tracer", "No steps generated."); return
 
-        k_settings = self.backend.get_keithley_settings_copy()
+        self.measurement_source_key = str(self.measurement_combo.currentData() or "keithley")
+        source = source_for(self.measurement_source_key)
         dwell_s = float(self.dwell_spin.value())
-        if dwell_s < float(k_settings.trace.bucket_interval_s):
-            QMessageBox.warning(self, "2D Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
-            return
 
         from backend.trace_timing import build_trace_point_timing
-        timing = build_trace_point_timing(
-            dwell_s,
-            float(k_settings.trace.bucket_interval_s),
-            float(k_settings.trace.poll_hz),
-        )
-
-        self._saved_keithley_settings = copy.deepcopy(k_settings)
-        k_settings.mode = "TRACE"
-        self.backend.apply_keithley_settings(k_settings)
+        if source.uses_keithley_trace:
+            k_settings = self.backend.get_keithley_settings_copy()
+            if dwell_s < float(k_settings.trace.bucket_interval_s):
+                QMessageBox.warning(self, "2D Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
+                return
+            timing = build_trace_point_timing(
+                dwell_s, float(k_settings.trace.bucket_interval_s), float(k_settings.trace.poll_hz)
+            )
+            self._saved_keithley_settings = copy.deepcopy(k_settings)
+            k_settings.mode = "TRACE"
+            self.backend.apply_keithley_settings(k_settings)
+        else:
+            if dwell_s < 1.0:
+                QMessageBox.warning(self, "2D Tracer", "Legacy current sources require at least 1.0 s dwell for the 1 Hz readback.")
+                return
+            timing = build_trace_point_timing(dwell_s, 1.0, source.nominal_poll_hz)
+            self._saved_keithley_settings = None
 
         self.v1 = v1; self.v2 = v2
         self.orig1 = self._get_set_value(self.param1.channel); self.orig2 = self._get_set_value(self.param2.channel)
         self.applied = None
         self.grid = [[float("nan") for _ in self.v1] for __ in self.v2]
+        self.range_grid = [["" for _ in self.v1] for __ in self.v2]
         self.i = -1; self.j = 0; self.sel_i = None; self.sel_j = None
         self.dwell_s = dwell_s
         self.settle_s = timing.settle_s
@@ -319,14 +387,17 @@ class Tracer2DDialog(QDialog):
         self.elapsed_s = 0.0
         self.point_phase = "settle"
         if self.settle_s <= 0.0:
-            try:
-                self._trace_reset_request_id = self.backend.reset_keithley_trace()
-            except Exception as e:
-                self.status.setText(f"Keithley trace reset failed: {e}")
-                self._trace_reset_request_id = None
-                return
-            self.point_phase = "reset_wait"
-            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+            if Tracer2DDialog._uses_keithley_trace(self):
+                try:
+                    self._trace_reset_request_id = self.backend.reset_keithley_trace()
+                except Exception as e:
+                    self.status.setText(f"Keithley trace reset failed: {e}")
+                    self._trace_reset_request_id = None
+                    return
+                self.point_phase = "reset_wait"
+                self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+            else:
+                Tracer2DDialog._begin_measurement_phase(self)
         else:
             self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling...")
 
@@ -341,15 +412,18 @@ class Tracer2DDialog(QDialog):
             self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): settling... ({rem:.1f}s)")
             if self.elapsed_s < self.settle_s:
                 return
-            try:
-                self._trace_reset_request_id = self.backend.reset_keithley_trace()
-            except Exception as e:
-                self.status.setText(f"Keithley trace reset failed: {e}")
-                self._trace_reset_request_id = None
-                return
-            self.point_phase = "reset_wait"
-            self.elapsed_s = 0.0
-            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+            if Tracer2DDialog._uses_keithley_trace(self):
+                try:
+                    self._trace_reset_request_id = self.backend.reset_keithley_trace()
+                except Exception as e:
+                    self.status.setText(f"Keithley trace reset failed: {e}")
+                    self._trace_reset_request_id = None
+                    return
+                self.point_phase = "reset_wait"
+                self.elapsed_s = 0.0
+                self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
+            else:
+                Tracer2DDialog._begin_measurement_phase(self)
             return
 
         if self.point_phase == "reset_wait":
@@ -357,9 +431,7 @@ class Tracer2DDialog(QDialog):
             if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
                 self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for Keithley trace reset...")
                 return
-            self.point_phase = "measure"
-            self.elapsed_s = 0.0
-            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring...")
+            Tracer2DDialog._begin_measurement_phase(self)
             return
 
         if self.point_phase != "measure":
@@ -370,14 +442,15 @@ class Tracer2DDialog(QDialog):
             self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): measuring... ({rem:.1f}s)")
             return
 
-        y = self._get_trace_mean()
+        y = Tracer2DDialog._get_selected_measurement(self)
         if y is None and self.elapsed_s < self.measure_timeout_s:
-            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for complete Keithley bucket...")
+            self.status.setText(f"Point ({self.j + 1}/{len(self.v2)}, {self.i + 1}/{len(self.v1)}): waiting for fresh {Tracer2DDialog._measurement_label(self)} data...")
             return
         if y is None:
             y = float("nan")
 
         self.grid[self.j][self.i] = float(y)
+        self.range_grid[self.j][self.i] = read_range_label(self.backend.model, self.measurement_source_key)
         self._draw_heatmap()
         self._next_point()
 
@@ -398,7 +471,7 @@ class Tracer2DDialog(QDialog):
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
             self._select(best_i, best_j); self.btn_apply.setEnabled(True)
-            self.status.setText(f"Finished. Max at P1={self.v1[best_i]:.3f}, P2={self.v2[best_j]:.3f}, Keithley={best_val:.2f} nA.")
+            self.status.setText(f"Finished. Max at P1={self.v1[best_i]:.3f}, P2={self.v2[best_j]:.3f}, {Tracer2DDialog._measurement_label(self)}={best_val:.2f} nA.")
         else:
             self.btn_apply.setEnabled(False); self.status.setText("Finished (no valid data).")
 
@@ -410,7 +483,7 @@ class Tracer2DDialog(QDialog):
         best_i, best_j, best_val = self._best_cell()
         if best_i is not None and best_j is not None and best_val is not None:
             self._select(best_i, best_j); self.btn_apply.setEnabled(True)
-            self.status.setText(f"Stopped. Current max at P1={self.v1[best_i]:.3f}, P2={self.v2[best_j]:.3f}, Keithley={best_val:.2f} nA.")
+            self.status.setText(f"Stopped. Current max at P1={self.v1[best_i]:.3f}, P2={self.v2[best_j]:.3f}, {Tracer2DDialog._measurement_label(self)}={best_val:.2f} nA.")
         else:
             self.btn_apply.setEnabled(False); self.status.setText("Stopped (no valid data yet).")
 
@@ -423,7 +496,7 @@ class Tracer2DDialog(QDialog):
         extent = [self.v1[0], self.v1[-1], self.v2[0], self.v2[-1]]
         if self.im is None:
             self.im = self.ax.imshow(Z, origin="lower", aspect="auto", interpolation="nearest", extent=extent)
-            self.cbar = self.fig.colorbar(self.im, ax=self.ax, label="Keithley mean [nA]")
+            self.cbar = self.fig.colorbar(self.im, ax=self.ax, label=f"{Tracer2DDialog._measurement_label(self)} current [nA]")
         else:
             self.im.set_data(Z); self.im.set_extent(extent)
             finite = np.isfinite(Z)
@@ -434,6 +507,7 @@ class Tracer2DDialog(QDialog):
                 self.im.set_clim(vmin, vmax)
             if self.cbar is not None:
                 self.cbar.update_normal(self.im)
+                self.cbar.set_label(f"{Tracer2DDialog._measurement_label(self)} current [nA]")
         if self.sel_i is not None and self.sel_j is not None:
             self.marker.set_data([self.v1[self.sel_i]], [self.v2[self.sel_j]])
         else:
@@ -452,7 +526,7 @@ class Tracer2DDialog(QDialog):
         self.sel_i, self.sel_j = i, j
         self._draw_heatmap()
         val = self.grid[j][i]
-        self.status.setText(f"Selected: P1={self.v1[i]:.3f}, P2={self.v2[j]:.3f}, Keithley={val:.2f} nA.")
+        self.status.setText(f"Selected: P1={self.v1[i]:.3f}, P2={self.v2[j]:.3f}, {Tracer2DDialog._measurement_label(self)}={val:.2f} nA.")
 
     def export_csv(self) -> None:
         if self.running:
@@ -478,13 +552,14 @@ class Tracer2DDialog(QDialog):
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["j_index", "i_index", "param2_value", "param1_value", "keithley_mean_nA", "selected"])
+                w.writerow(["j_index", "i_index", "param2_value", "param1_value", "measurement_source", "current_nA", "measurement_range", "selected"])
                 for j in range(len(self.v2)):
                     for i in range(len(self.v1)):
                         val = self.grid[j][i]
                         if val != val:
                             continue
-                        w.writerow([j, i, float(self.v2[j]), float(self.v1[i]), float(val), 1 if (self.sel_i == i and self.sel_j == j) else 0])
+                        range_label = self.range_grid[j][i] if j < len(self.range_grid) and i < len(self.range_grid[j]) else ""
+                        w.writerow([j, i, float(self.v2[j]), float(self.v1[i]), Tracer2DDialog._measurement_label(self), float(val), range_label, 1 if (self.sel_i == i and self.sel_j == j) else 0])
         except Exception as e:
             QMessageBox.critical(self, "Export CSV", f"Failed to write file:\n{e}")
             return

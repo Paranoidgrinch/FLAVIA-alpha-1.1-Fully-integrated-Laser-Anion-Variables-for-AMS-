@@ -4,6 +4,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Dict, List, Tuple
 
+from .legacy_definitions import (
+    HEE_ESA_READBACKS,
+    LEGACY_ANALOG_CONTROLS,
+    LEGACY_ANALOG_BY_GROUP,
+    LEGACY_CURRENT_DEVICES,
+    LEGACY_DIGITAL_CONTROLS,
+)
+
 
 # --- MQTT defaults ---
 MQTT_DEFAULT_HOST = "192.168.0.20"
@@ -39,6 +47,12 @@ class ChannelDef:
     min_val: Optional[float] = None
     max_val: Optional[float] = None
     default_step: Optional[float] = None
+
+    # Transport is deliberately independent of the UI.  Existing controls use
+    # MQTT; the Tandetron controls are routed by Backend through the legacy
+    # transport once that worker is connected.
+    transport: str = "model"
+    display_name: Optional[str] = None
 
 
 # --- UI setpoint limits (from old GUI create_slider_control calls) ---
@@ -103,6 +117,8 @@ def _add(
     min_val: Optional[float] = None,
     max_val: Optional[float] = None,
     default_step: Optional[float] = None,
+    transport: Optional[str] = None,
+    display_name: Optional[str] = None,
 ) -> None:
     # Auto-apply limits for setpoint channels (from old GUI)
     if kind == "set" and name in SETPOINT_LIMITS:
@@ -124,6 +140,8 @@ def _add(
         min_val=min_val,
         max_val=max_val,
         default_step=default_step,
+        transport=transport or ("mqtt" if topic_cmd else "model"),
+        display_name=display_name,
     )
 
 
@@ -298,6 +316,48 @@ for ch in ["bias", "1x", "1y", "2x", "2y", "3x", "3y"]:
 
 
 # =========================
+# Legacy Tandetron channels
+# =========================
+# The transport implementation intentionally lives outside this registry.  This
+# lets the GUI/tracers be completed before the legacy TCP worker is connected.
+_add("legacy/connected", kind="state", transport="legacy", display_name="Legacy Tandetron")
+_add("legacy/last_error", kind="state", transport="legacy", display_name="Legacy TCP error")
+
+for _legacy in LEGACY_ANALOG_CONTROLS:
+    _add(
+        _legacy.set_channel, unit=_legacy.unit, kind="set", decimals=_legacy.decimals,
+        min_val=_legacy.min_val, max_val=_legacy.max_val, default_step=_legacy.default_step,
+        transport="legacy", display_name=_legacy.label,
+    )
+    _add(
+        _legacy.meas_channel, unit=(_legacy.unit if _legacy.key != "hee_esa_common" else "kV"),
+        kind="meas", decimals=_legacy.decimals, transport="legacy", display_name=_legacy.label,
+    )
+
+# The common HEE ESA control has four independent plate-voltage readbacks.
+for _label, _channel, _board, _input in HEE_ESA_READBACKS:
+    if _channel not in CHANNELS:
+        _add(_channel, unit="kV", kind="meas", decimals=2, transport="legacy", display_name=_label)
+
+for _digital in LEGACY_DIGITAL_CONTROLS:
+    _add(
+        _digital.state_channel, kind="state", decimals=0, transport="legacy",
+        display_name=_digital.label,
+    )
+
+for _dev in LEGACY_CURRENT_DEVICES:
+    _add(_dev.percent_channel, unit="% f.s.", kind="meas", decimals=3, transport="legacy", display_name=_dev.label)
+    _add(_dev.current_channel, unit="A", kind="derived", decimals=12, transport="legacy", display_name=_dev.label)
+    _add(_dev.range_channel, kind="state", decimals=0, transport="legacy", display_name=f"{_dev.label} Range")
+    _add(_dev.overload_channel, kind="state", decimals=0, transport="legacy", display_name=f"{_dev.label} Overload")
+    if _dev.autorange_channel:
+        _add(_dev.autorange_channel, kind="state", decimals=0, transport="legacy", display_name=f"{_dev.label} Auto Range")
+    if _dev.negative_channel:
+        _add(_dev.negative_channel, kind="state", decimals=0, transport="legacy", display_name=f"{_dev.label} Negative")
+    if _dev.target_channel:
+        _add(_dev.target_channel, kind="state", decimals=0, transport="legacy", display_name=f"{_dev.label} Target")
+
+# =========================
 # Groups (für GUI Panels als nächster Schritt)
 # =========================
 GROUPS: Dict[str, List[str]] = {
@@ -360,6 +420,13 @@ GROUPS: Dict[str, List[str]] = {
        
     ],
 
+    "BI Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["BI Controls"]],
+    "ACC Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["ACC Controls"]],
+    "HES Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["HES Controls"]],
+    "HEM Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["HEM Controls"]],
+    "HEE Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["HEE Controls"]],
+    "DSW Controls": [d.set_channel for d in LEGACY_ANALOG_BY_GROUP["DSW Controls"]],
+
     "Pressure": [
         "pressure/set_v",
         "pressure/meas_v",
@@ -391,3 +458,9 @@ def step_for(name: str) -> Optional[float]:
     if c and c.default_step is not None:
         return float(c.default_step)
     return None
+
+def display_name_for(name: str) -> str:
+    c = CHANNELS.get(name)
+    if c and c.display_name:
+        return c.display_name
+    return name

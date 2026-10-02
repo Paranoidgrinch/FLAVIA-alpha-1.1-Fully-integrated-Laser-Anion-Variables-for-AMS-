@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import csv
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, List
@@ -15,6 +16,11 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 from backend.channels import range_for, step_for, GROUPS, CHANNELS, unit_for
 from gui.panels.common import pretty_name
+from gui.legacy_safety import ACC_TERMINAL_CHANNEL, confirm_terminal_voltage_change
+from backend.trace_sources import (
+    TRACE_MEASUREMENT_ORDER, TRACE_MEASUREMENT_SOURCES, source_for,
+    read_measurement_nA, read_range_label,
+)
 from backend.qpt_coordinates import (
     QPT_ASTIGMATISM_SET,
     QPT_FOCUS_SET,
@@ -30,11 +36,14 @@ def _pretty_label(ch: str) -> str:
         return "QPT Focus"
     if ch == QPT_ASTIGMATISM_SET:
         return "QPT Astigmatism"
+    c = CHANNELS.get(ch)
+    if c is not None and c.display_name:
+        return c.display_name
     return pretty_name(ch)
 
 
 def _traceable_set_channels() -> list[str]:
-    allowed_groups = ["Ion Source", "Ion Optics", "Ion Cooler"]
+    allowed_groups = ["Ion Source", "Ion Optics", "Ion Cooler", "BI Controls", "ACC Controls", "HES Controls", "HEM Controls", "HEE Controls", "DSW Controls"]
     out: list[str] = []
     for g in allowed_groups:
         for ch in GROUPS.get(g, []):
@@ -43,7 +52,7 @@ def _traceable_set_channels() -> list[str]:
                 continue
             if ch in QPT_HARDWARE_SET_CHANNELS:
                 continue
-            if c.kind == "set" and (c.topic_cmd or ch in QPT_VIRTUAL_SET_CHANNELS):
+            if c.kind == "set" and (c.topic_cmd or c.transport == "legacy" or ch in QPT_VIRTUAL_SET_CHANNELS):
                 out.append(ch)
     if "magnet_current_set" in CHANNELS:
         out.append("magnet_current_set")
@@ -82,14 +91,24 @@ class Tracer1DDialog(QDialog):
         self.x_values: List[float] = []
         self.y_values: List[float] = []
         self.selected_index: Optional[int] = None
+        self.range_labels: List[str] = []
+        self.measurement_source_key = "keithley"
+        self._measurement_started_at = 0.0
         self._last_dir = ""
 
         self._build_ui()
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._on_timer_tick)
 
-        self.adapter.register_channel("keithley/trace/mean_nA")
-        self.adapter.register_channel("keithley/trace/n")
+        for source_key in TRACE_MEASUREMENT_ORDER:
+            source = source_for(source_key)
+            self.adapter.register_channel(source.value_channel)
+            if source.count_channel:
+                self.adapter.register_channel(source.count_channel)
+            if source.range_channel:
+                self.adapter.register_channel(source.range_channel)
+            if source.overload_channel:
+                self.adapter.register_channel(source.overload_channel)
 
         if self.param_combo.count() > 0:
             self.param_combo.setCurrentIndex(0)
@@ -106,6 +125,15 @@ class Tracer1DDialog(QDialog):
             self.param_combo.addItem(_pretty_label(ch), userData=ch)
         self.param_combo.currentIndexChanged.connect(self._update_param_fields)
         form.addWidget(self.param_combo, row, 1, 1, 3)
+
+        row += 1
+        form.addWidget(QLabel("Measurement source:"), row, 0)
+        self.measurement_combo = QComboBox()
+        for source_key in TRACE_MEASUREMENT_ORDER:
+            source = TRACE_MEASUREMENT_SOURCES[source_key]
+            self.measurement_combo.addItem(source.label, userData=source_key)
+        self.measurement_combo.currentIndexChanged.connect(self._measurement_source_changed)
+        form.addWidget(self.measurement_combo, row, 1, 1, 3)
 
         row += 1
         form.addWidget(QLabel("Start:"), row, 0)
@@ -132,7 +160,7 @@ class Tracer1DDialog(QDialog):
         self.canvas = FigureCanvas(self.figure)
         self.ax = self.figure.add_subplot(111)
         self.ax.set_xlabel("Setpoint")
-        self.ax.set_ylabel("Keithley mean [nA]")
+        self.ax.set_ylabel("Keithley current [nA]")
         (self.trace_line,) = self.ax.plot([], [], marker="o", linestyle="-")
         self.vline = self.ax.axvline(0.0, color="red", visible=False)
         self.canvas.mpl_connect("button_press_event", self._on_plot_click)
@@ -155,10 +183,43 @@ class Tracer1DDialog(QDialog):
             return 0.0
 
     def _set_param_value(self, ch: str, value: float) -> None:
+        if ch == ACC_TERMINAL_CHANNEL:
+            if not confirm_terminal_voltage_change(self, self.backend, float(value)):
+                raise RuntimeError("ACC terminal-voltage change cancelled by operator.")
         if ch == "magnet_current_set":
             self.backend.set_magnet_current(float(value))
         else:
             self.backend.set_channel(ch, float(value))
+
+    def _measurement_source_changed(self, *_args) -> None:
+        key = self.measurement_combo.currentData() or "keithley"
+        self.measurement_source_key = str(key)
+        self.ax.set_ylabel(f"{source_for(self.measurement_source_key).label} current [nA]")
+        self.canvas.draw_idle()
+
+    def _uses_keithley_trace(self) -> bool:
+        return source_for(getattr(self, "measurement_source_key", "keithley")).uses_keithley_trace
+
+    def _measurement_label(self) -> str:
+        return source_for(getattr(self, "measurement_source_key", "keithley")).label
+
+    def _get_selected_measurement_nA(self) -> Optional[float]:
+        key = getattr(self, "measurement_source_key", "keithley")
+        if source_for(key).uses_keithley_trace:
+            return self._get_trace_mean_nA()
+        return read_measurement_nA(
+            self.backend.model, key,
+            min_timestamp=getattr(self, "_measurement_started_at", None),
+            max_age_s=2.5,
+        )
+
+    def _begin_measurement_phase(self) -> None:
+        self.step_phase = "measure"
+        self.step_elapsed = 0.0
+        self._measurement_started_at = time.time()
+        self.status_label.setText(
+            f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring {Tracer1DDialog._measurement_label(self)}..."
+        )
 
     def _get_trace_mean_nA(self) -> Optional[float]:
         n_ch = self.backend.model.get("keithley/trace/n")
@@ -251,21 +312,27 @@ class Tracer1DDialog(QDialog):
             QMessageBox.warning(self, "Tracer", "No steps generated.")
             return
 
-        k_settings = self.backend.get_keithley_settings_copy()
-        if dwell < float(k_settings.trace.bucket_interval_s):
-            QMessageBox.warning(self, "Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
-            return
+        self.measurement_source_key = str(self.measurement_combo.currentData() or "keithley")
+        source = source_for(self.measurement_source_key)
 
         from backend.trace_timing import build_trace_point_timing
-        timing = build_trace_point_timing(
-            dwell,
-            float(k_settings.trace.bucket_interval_s),
-            float(k_settings.trace.poll_hz),
-        )
-
-        self._saved_keithley_settings = copy.deepcopy(k_settings)
-        k_settings.mode = "TRACE"
-        self.backend.apply_keithley_settings(k_settings)
+        if source.uses_keithley_trace:
+            k_settings = self.backend.get_keithley_settings_copy()
+            if dwell < float(k_settings.trace.bucket_interval_s):
+                QMessageBox.warning(self, "Tracer", f"Dwell must be at least {k_settings.trace.bucket_interval_s:.2f} s for TRACE mode.")
+                return
+            timing = build_trace_point_timing(
+                dwell, float(k_settings.trace.bucket_interval_s), float(k_settings.trace.poll_hz)
+            )
+            self._saved_keithley_settings = copy.deepcopy(k_settings)
+            k_settings.mode = "TRACE"
+            self.backend.apply_keithley_settings(k_settings)
+        else:
+            if dwell < 1.0:
+                QMessageBox.warning(self, "Tracer", "Legacy current sources require at least 1.0 s dwell for the 1 Hz readback.")
+                return
+            timing = build_trace_point_timing(dwell, 1.0, source.nominal_poll_hz)
+            self._saved_keithley_settings = None
 
         self.original_value = float(self._get_current_set_value(self.param.channel))
         self.step_values = values
@@ -276,11 +343,11 @@ class Tracer1DDialog(QDialog):
         self._tick_dt_s = 0.1
         self.current_step_index = -1
         self.step_elapsed = 0.0
-        self.x_values.clear(); self.y_values.clear(); self.selected_index = None; self.applied_value = None
+        self.x_values.clear(); self.y_values.clear(); self.range_labels.clear(); self.selected_index = None; self.applied_value = None
         self._update_plot()
         self.tracing_active = True
         self.start_btn.setEnabled(False); self.stop_btn.setEnabled(True); self.apply_btn.setEnabled(False); self.export_btn.setEnabled(False)
-        self.status_label.setText(f"Tracing {self.param.channel} over {len(values)} steps (dwell {self.dwell_time:.1f}s = settle {self.settle_time:.1f}s + measure {self.measure_time:.1f}s).")
+        self.status_label.setText(f"Tracing {self.param.channel} with {source.label} over {len(values)} steps (dwell {self.dwell_time:.1f}s = settle {self.settle_time:.1f}s + measure {self.measure_time:.1f}s).")
         self.timer.start(int(self._tick_dt_s * 1000))
         self._next_step()
 
@@ -297,14 +364,17 @@ class Tracer1DDialog(QDialog):
         self.step_elapsed = 0.0
         self.step_phase = "settle"
         if self.settle_time <= 0.0:
-            try:
-                self._trace_reset_request_id = self.backend.reset_keithley_trace()
-            except Exception as e:
-                self.status_label.setText(f"Keithley trace reset failed: {e}")
-                self._trace_reset_request_id = None
-                return
-            self.step_phase = "reset_wait"
-            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+            if Tracer1DDialog._uses_keithley_trace(self):
+                try:
+                    self._trace_reset_request_id = self.backend.reset_keithley_trace()
+                except Exception as e:
+                    self.status_label.setText(f"Keithley trace reset failed: {e}")
+                    self._trace_reset_request_id = None
+                    return
+                self.step_phase = "reset_wait"
+                self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+            else:
+                Tracer1DDialog._begin_measurement_phase(self)
         else:
             self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: set={value:.3f}, settling...")
 
@@ -319,15 +389,18 @@ class Tracer1DDialog(QDialog):
             self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: settling... ({remaining:.1f}s left)")
             if self.step_elapsed < self.settle_time:
                 return
-            try:
-                self._trace_reset_request_id = self.backend.reset_keithley_trace()
-            except Exception as e:
-                self.status_label.setText(f"Keithley trace reset failed: {e}")
-                self._trace_reset_request_id = None
-                return
-            self.step_phase = "reset_wait"
-            self.step_elapsed = 0.0
-            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+            if Tracer1DDialog._uses_keithley_trace(self):
+                try:
+                    self._trace_reset_request_id = self.backend.reset_keithley_trace()
+                except Exception as e:
+                    self.status_label.setText(f"Keithley trace reset failed: {e}")
+                    self._trace_reset_request_id = None
+                    return
+                self.step_phase = "reset_wait"
+                self.step_elapsed = 0.0
+                self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
+            else:
+                Tracer1DDialog._begin_measurement_phase(self)
             return
 
         if self.step_phase == "reset_wait":
@@ -335,9 +408,7 @@ class Tracer1DDialog(QDialog):
             if request_id is None or not self.backend.keithley_trace_reset_acknowledged(request_id):
                 self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for Keithley trace reset...")
                 return
-            self.step_phase = "measure"
-            self.step_elapsed = 0.0
-            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring...")
+            Tracer1DDialog._begin_measurement_phase(self)
             return
 
         if self.step_phase != "measure":
@@ -348,9 +419,9 @@ class Tracer1DDialog(QDialog):
             self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: measuring... ({remaining:.1f}s left)")
             return
 
-        avg = self._get_trace_mean_nA()
+        avg = self._get_selected_measurement_nA()
         if avg is None and self.step_elapsed < self.measure_timeout_s:
-            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for complete Keithley bucket...")
+            self.status_label.setText(f"Step {self.current_step_index + 1}/{len(self.step_values)}: waiting for fresh {self._measurement_label()} data...")
             return
         if avg is None:
             avg = float("nan")
@@ -358,6 +429,7 @@ class Tracer1DDialog(QDialog):
         setpoint = float(self.step_values[self.current_step_index])
         self.x_values.append(setpoint)
         self.y_values.append(float(avg))
+        self.range_labels.append(read_range_label(self.backend.model, self.measurement_source_key))
         self._update_plot()
         self._next_step()
 
@@ -387,7 +459,7 @@ class Tracer1DDialog(QDialog):
         best_i = self._best_index()
         if best_i is not None:
             self._select_index(best_i); self.apply_btn.setEnabled(True)
-            self.status_label.setText(f"Trace finished. Max at {self.x_values[best_i]:.3f}, Keithley={self.y_values[best_i]:.2f} nA.")
+            self.status_label.setText(f"Trace finished. Max at {self.x_values[best_i]:.3f}, {self._measurement_label()}={self.y_values[best_i]:.2f} nA.")
         else:
             self.apply_btn.setEnabled(False); self.status_label.setText("Trace finished (no valid data).")
 
@@ -402,7 +474,7 @@ class Tracer1DDialog(QDialog):
         best_i = self._best_index()
         if best_i is not None:
             self._select_index(best_i); self.apply_btn.setEnabled(True)
-            self.status_label.setText(f"Trace stopped. Max at {self.x_values[best_i]:.3f}, Keithley={self.y_values[best_i]:.2f} nA.")
+            self.status_label.setText(f"Trace stopped. Max at {self.x_values[best_i]:.3f}, {self._measurement_label()}={self.y_values[best_i]:.2f} nA.")
         else:
             self.apply_btn.setEnabled(False); self.status_label.setText("Trace stopped (no valid data yet).")
 
@@ -443,7 +515,7 @@ class Tracer1DDialog(QDialog):
         self.selected_index = idx
         self._update_plot()
         self.apply_btn.setEnabled(True)
-        self.status_label.setText(f"Selected setpoint={self.x_values[idx]:.3f}, Keithley={self.y_values[idx]:.2f} nA.")
+        self.status_label.setText(f"Selected setpoint={self.x_values[idx]:.3f}, {self._measurement_label()}={self.y_values[idx]:.2f} nA.")
 
     def export_csv(self) -> None:
         if not self.x_values:
@@ -468,9 +540,10 @@ class Tracer1DDialog(QDialog):
         try:
             with open(path, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["step_index", "setpoint", "keithley_mean_nA", "selected"])
+                w.writerow(["step_index", "setpoint", "measurement_source", "current_nA", "measurement_range", "selected"])
                 for i, (x, y) in enumerate(zip(self.x_values, self.y_values)):
-                    w.writerow([i, float(x), float(y), 1 if self.selected_index == i else 0])
+                    range_label = self.range_labels[i] if i < len(self.range_labels) else ""
+                    w.writerow([i, float(x), self._measurement_label(), float(y), range_label, 1 if self.selected_index == i else 0])
         except Exception as e:
             QMessageBox.critical(self, "Export CSV", f"Failed to write file:\n{e}")
             return

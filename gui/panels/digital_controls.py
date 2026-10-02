@@ -7,10 +7,15 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QGroupBox, QGridLayout, QHBoxLayout,
-    QLabel, QPushButton, QCheckBox, QDialog
+    QLabel, QPushButton, QCheckBox, QDialog, QMessageBox
 )
 
 from gui.qt_adapter import QtBackendAdapter
+from backend.legacy_definitions import (
+    LEGACY_DIGITAL_CONTROLS,
+    LEGACY_DIGITAL_BY_CHANNEL,
+    LEGACY_EXCLUSIVE_CUP_CHANNELS,
+)
 
 
 class HVDialog(QDialog):
@@ -77,6 +82,7 @@ class DigitalControlsPanel(QWidget):
 
         self._updaters: List[Callable[[str, object], None]] = []
         self._updating_from_status = False
+        self._legacy_updating = False
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -138,10 +144,31 @@ class DigitalControlsPanel(QWidget):
         cup_v.addLayout(grid)
         lay.addWidget(cup_group)
 
+        legacy_group = QGroupBox("Legacy Cups & Apertures")
+        legacy_group.setStyleSheet("""
+            QGroupBox { font-size: 14px; font-weight: 700; }
+            QCheckBox { margin: 0px; padding: 0px; spacing: 3px; }
+            QCheckBox::indicator { width: 13px; height: 13px; }
+        """)
+        legacy_grid = QGridLayout(legacy_group)
+        legacy_grid.setContentsMargins(8, 8, 8, 8)
+        legacy_grid.setHorizontalSpacing(6)
+        legacy_grid.setVerticalSpacing(2)
+        self.legacy_boxes = {}
+        for i, definition in enumerate(LEGACY_DIGITAL_CONTROLS):
+            cb = QCheckBox(definition.label)
+            cb.setToolTip("Checked = inserted")
+            cb.toggled.connect(lambda checked, ch=definition.state_channel: self._on_legacy_toggle(ch, checked))
+            self.legacy_boxes[definition.state_channel] = cb
+            legacy_grid.addWidget(cb, i // 4, i % 4)
+        lay.addWidget(legacy_group)
+
         # subscribe
         self.adapter.channelUpdated.connect(self._on_update)
         for ch in ["cup/connected", "cup/selected", "cup/hv", "cs/attenuator/state", "cs/quick_cool/state"]:
             self.adapter.register_channel(ch)
+        for definition in LEGACY_DIGITAL_CONTROLS:
+            self.adapter.register_channel(definition.state_channel)
 
     def _publish_bool(self, channel: str, on: bool):
         if self._updating_from_status:
@@ -186,10 +213,69 @@ class DigitalControlsPanel(QWidget):
             if not any(cb.isChecked() for cb in self.cup_boxes):
                 self._set_cup(0)
 
+    def _on_legacy_toggle(self, channel: str, inserted: bool) -> None:
+        if self._legacy_updating:
+            return
+        definition = LEGACY_DIGITAL_BY_CHANNEL[channel]
+
+        # GIC is intentionally not part of the exclusive cup group, but
+        # retracting it requires explicit operator confirmation.
+        if definition.confirm_retract and not inserted:
+            answer = QMessageBox.question(
+                self,
+                "GIC Cup",
+                "Retract the GIC Cup?\n\nAre you sure?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                cb = self.legacy_boxes[channel]
+                self._legacy_updating = True
+                try:
+                    cb.blockSignals(True)
+                    cb.setChecked(True)
+                    cb.blockSignals(False)
+                finally:
+                    self._legacy_updating = False
+                return
+
+        if inserted and definition.exclusive_cup:
+            self._legacy_updating = True
+            try:
+                for other_channel in LEGACY_EXCLUSIVE_CUP_CHANNELS:
+                    if other_channel == channel:
+                        continue
+                    other = self.legacy_boxes.get(other_channel)
+                    if other is not None and other.isChecked():
+                        other.blockSignals(True)
+                        other.setChecked(False)
+                        other.blockSignals(False)
+                        try:
+                            self.backend.set_bool(other_channel, False)
+                        except Exception:
+                            pass
+            finally:
+                self._legacy_updating = False
+
+        try:
+            self.backend.set_bool(channel, bool(inserted))
+        except Exception:
+            pass
+
     def _set_cup(self, cup: int):
         self.backend.cup.select_cup(int(cup))
 
     def _on_update(self, name: str, value):
+        legacy_box = getattr(self, "legacy_boxes", {}).get(name)
+        if legacy_box is not None:
+            self._legacy_updating = True
+            try:
+                legacy_box.blockSignals(True)
+                legacy_box.setChecked(bool(value))
+                legacy_box.blockSignals(False)
+            finally:
+                self._legacy_updating = False
+
         # update integrated user-digitals
         if name == "cs/attenuator/state":
             self._updating_from_status = True

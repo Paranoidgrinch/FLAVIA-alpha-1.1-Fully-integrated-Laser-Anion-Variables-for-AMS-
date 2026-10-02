@@ -25,6 +25,8 @@ from .workers.cup_switch_worker import CupSwitchWorker, CupSwitchConfig
 from .workers.keithley_6485_worker import Keithley6485Worker, KeithleySettings
 from .workers.magnet_worker import MagnetWorker
 from .workers.gaussmeter_worker import GaussmeterWorker
+from .workers.legacy_tcp_worker import LegacyTcpWorker, LegacyTcpConfig
+from .legacy_definitions import LEGACY_ANALOG_BY_SET, LEGACY_DIGITAL_BY_CHANNEL
 from .services.logging_service import LoggingService, LoggingConfig
 from .services.config_service import ConfigService, ConfigPayload
 from .services.rfq_service import RFQService
@@ -46,6 +48,7 @@ class Backend:
         *,
         cup_cfg: CupSwitchConfig = CupSwitchConfig(),
         keithley_settings: Optional[KeithleySettings] = None,
+        legacy_cfg: LegacyTcpConfig = LegacyTcpConfig(),
     ):
         self.model = DataModel(unit_resolver=unit_for)
 
@@ -82,6 +85,7 @@ class Backend:
         self.mqtt = MqttSignalsWorker(self.model, host=mqtt_host, port=mqtt_port)
         self.cup = CupSwitchWorker(self.model, cfg=cup_cfg)
         self.keithley = Keithley6485Worker(self.model, settings=keithley_settings)
+        self.legacy = LegacyTcpWorker(self.model, cfg=legacy_cfg)
 
         # Services
         self.logging = LoggingService(self.model)
@@ -117,6 +121,7 @@ class Backend:
             return
         self._started = True
         self.mqtt.start()
+        self.legacy.start()
         self.cup.start()
         self.keithley.start()
         self.keithley.cmd_connect()
@@ -196,7 +201,10 @@ class Backend:
         except Exception:
             pass
 
-        for w in (self.mqtt, self.cup, self.keithley):
+        for name in ("legacy", "mqtt", "cup", "keithley"):
+            w = getattr(self, name, None)
+            if w is None:
+                continue
             try:
                 w.stop()
             except Exception:
@@ -316,13 +324,93 @@ class Backend:
             return
 
         c = CHANNELS.get(channel_name)
-        if c is None or not c.topic_cmd:
-            raise KeyError(f"Channel {channel_name!r} has no topic_cmd mapping.")
+        if c is None:
+            raise KeyError(f"Unknown channel {channel_name!r}.")
+
+        if c.transport == "legacy":
+            if channel_name in LEGACY_ANALOG_BY_SET:
+                self.set_legacy_channel(channel_name, value)
+                return
+            if channel_name in LEGACY_DIGITAL_BY_CHANNEL:
+                self.set_legacy_digital(channel_name, bool(value))
+                return
+            raise KeyError(f"Legacy channel {channel_name!r} is not directly writable.")
+
+        if not c.topic_cmd:
+            raise KeyError(f"Channel {channel_name!r} has no writable transport mapping.")
         d = decimals_for(channel_name, default=6)
         self.mqtt_publish_value(c.topic_cmd, value, decimals=d)
 
     def set_bool(self, channel_name: str, on: bool) -> None:
         self.set_channel(channel_name, bool(on))
+
+    # ----------------------
+    # Legacy Tandetron TCP API
+    # ----------------------
+    def set_legacy_channel(self, channel_name: str, value: Any) -> None:
+        definition = LEGACY_ANALOG_BY_SET.get(channel_name)
+        if definition is None:
+            raise KeyError(f"Unknown legacy analog channel {channel_name!r}.")
+        if definition.virtual:
+            raise RuntimeError(
+                f"{definition.label} is a legacy virtual control; its physical mapping is not validated yet."
+            )
+        value_f = float(value)
+        if value_f < definition.min_val or value_f > definition.max_val:
+            raise ValueError(
+                f"{definition.label} value {value_f} outside FLAVIA range "
+                f"[{definition.min_val}, {definition.max_val}]"
+            )
+        self.legacy.send_command(f"setAnalog {definition.legacy_id} {value_f}")
+        self.model.update(channel_name, value_f, source="legacy_cmd", quality="good")
+
+    def set_legacy_digital(self, channel_name: str, inserted: bool) -> None:
+        definition = LEGACY_DIGITAL_BY_CHANNEL.get(channel_name)
+        if definition is None:
+            raise KeyError(f"Unknown legacy digital channel {channel_name!r}.")
+        status = 0 if (bool(inserted) and definition.active_low_inserted) else 1
+        if not definition.active_low_inserted:
+            status = 1 if bool(inserted) else 0
+        self.legacy.send_command(f"setDigital {definition.board} {definition.channel} {status}")
+
+    def set_legacy_current_converter_range(self, converter_index: int, range_index: int) -> None:
+        converter = int(converter_index)
+        range_code = int(range_index)
+        if converter not in (0, 1):
+            raise ValueError("Current converter must be 0 or 1")
+        if not 0 <= range_code <= 6:
+            raise ValueError("Current converter range code must be 0..6")
+        self.legacy.send_command(f"setCurConvRange {converter} {range_code}")
+
+    def set_legacy_current_converter_autorange(self, converter_index: int, enabled: bool) -> None:
+        converter = int(converter_index)
+        if converter not in (0, 1):
+            raise ValueError("Current converter must be 0 or 1")
+        self.legacy.send_command(f"setCurConvAutoRange {converter} {1 if enabled else 0}")
+
+    def set_legacy_current_converter_target(self, converter_index: int, target_index: int) -> None:
+        converter = int(converter_index)
+        target = int(target_index)
+        if converter not in (0, 1):
+            raise ValueError("Current converter must be 0 or 1")
+        if not 0 <= target <= 15:
+            raise ValueError("Current converter target code must be 0..15")
+        self.legacy.send_command(f"setCurConvTarget {converter} {target}")
+
+    def set_legacy_gcpd_range(self, device_index: int, range_index: int) -> None:
+        device = int(device_index)
+        range_code = int(range_index)
+        if device not in (0, 1):
+            raise ValueError("GCPD device must be 0 or 1")
+        if not 0 <= range_code <= 3:
+            raise ValueError("GCPD range code must be 0..3")
+
+        if device == 0:
+            board, sel0, sel1 = 5, 3, 4
+        else:
+            board, sel0, sel1 = 6, 6, 7
+        self.legacy.send_command(f"setDigital {board} {sel0} {range_code & 1}")
+        self.legacy.send_command(f"setDigital {board} {sel1} {(range_code >> 1) & 1}")
 
     def _cancel_active_ramp(self) -> None:
         try:
